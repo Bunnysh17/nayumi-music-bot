@@ -22,6 +22,8 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
 COPY . .
 
 ENV PYTHONUNBUFFERED=1
+ENV PYTHONIOENCODING=utf-8
+ENV PYTHONUTF8=1
 ENV PORT=10000
 
 EXPOSE 10000
