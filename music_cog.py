@@ -49,82 +49,6 @@ from discord.ext import commands
 import discord.ext.voice_recv as voice_recv
 import speech_recognition as sr
 from pydub import AudioSegment
-
-# -------------------- VOICE RECV STABILITY & DAVE E2EE MONKEY PATCHES --------------------
-
-# PATCH 1: Safe Opus PacketDecoder with DAVE E2EE decryption support
-try:
-    import discord.ext.voice_recv.opus as _vrecv_opus
-    import davey
-
-    _orig_decode_packet = _vrecv_opus.PacketDecoder._decode_packet
-    def _safe_decode_packet(self, packet):
-        assert self._decoder is not None
-
-        if not packet:
-            next_packet = self._buffer.peek_next()
-            if next_packet is not None:
-                nextdata = getattr(next_packet, 'decrypted_data', None)
-                if nextdata:
-                    try:
-                        pcm = self._decoder.decode(nextdata, fec=True)
-                        return packet, pcm
-                    except Exception:
-                        pass
-            try:
-                pcm = self._decoder.decode(None, fec=False)
-                return packet, pcm
-            except Exception:
-                return packet, b''
-
-        data_to_decode = getattr(packet, 'decrypted_data', None)
-        if not data_to_decode:
-            return packet, b''
-
-        # If DAVE (MLS E2EE) is active in the voice connection, decrypt DAVE frame
-        vc = getattr(self.sink, 'voice_client', None) or getattr(self.sink, '_voice_client', None)
-        if vc and getattr(vc, '_connection', None):
-            conn = vc._connection
-            dave_sess = getattr(conn, 'dave_session', None)
-            if dave_sess and getattr(dave_sess, 'ready', False):
-                uid = getattr(self, '_cached_id', None) or (vc._get_id_from_ssrc(self.ssrc) if hasattr(vc, '_get_id_from_ssrc') else None)
-                if uid:
-                    try:
-                        dave_decrypted = dave_sess.decrypt(uid, davey.MediaType.audio, data_to_decode)
-                        if dave_decrypted:
-                            data_to_decode = dave_decrypted
-                    except Exception:
-                        pass
-
-        try:
-            pcm = self._decoder.decode(data_to_decode, fec=False)
-            return packet, pcm
-        except Exception:
-            return packet, b''
-
-    _vrecv_opus.PacketDecoder._decode_packet = _safe_decode_packet
-    print("[PATCH 1/2] ✅ Opus PacketDecoder DAVE E2EE patch applied.", flush=True)
-except Exception as _patch1_err:
-    print(f"[PATCH 1/2] ❌ Opus PacketDecoder patch FAILED: {_patch1_err}", flush=True)
-
-# PATCH 2: Fix discord.py SocketReader idle-pause bug (critical for voice_recv to receive any data)
-try:
-    import discord.voice_state as _dpy_vs
-
-    def _socket_reader_register(self, callback):
-        self._callbacks.append(callback)
-        self._idle_paused = False
-        self._running.set()
-
-    def _socket_reader_resume(self, *, force: bool = False):
-        self._idle_paused = False
-        self._running.set()
-
-    _dpy_vs.SocketReader.register = _socket_reader_register
-    _dpy_vs.SocketReader.resume = _socket_reader_resume
-    print("[PATCH 2/2] ✅ SocketReader idle-pause fix applied.", flush=True)
-except Exception as _patch2_err:
-    print(f"[PATCH 2/2] ❌ SocketReader patch FAILED: {_patch2_err}", flush=True)
 from discord.http import Route
 import yt_dlp
 import aiohttp
@@ -260,14 +184,22 @@ elif shutil.which("ffmpeg"):
 else:
     try:
         FFMPEG_EXECUTABLE = imageio_ffmpeg.get_ffmpeg_exe()
+        if FFMPEG_EXECUTABLE and os.path.exists(FFMPEG_EXECUTABLE):
+            try:
+                os.chmod(FFMPEG_EXECUTABLE, 0o755)
+            except Exception:
+                pass
     except Exception:
         FFMPEG_EXECUTABLE = "ffmpeg"
 
 if not discord.opus.is_loaded():
-    try:
-        discord.opus._load_default()
-    except Exception:
-        pass
+    for candidate in ["libopus.so.0", "libopus.so", "/usr/lib/x86_64-linux-gnu/libopus.so.0", "/usr/lib/x86_64-linux-gnu/libopus.so", "/usr/local/lib/libopus.so", "libopus-0.dll", "opus.dll", "opus"]:
+        try:
+            discord.opus.load_opus(candidate)
+            if discord.opus.is_loaded():
+                break
+        except Exception:
+            pass
 
 def get_ytdl_cookie_file() -> Optional[str]:
     for path in ["cookies.txt", "youtube_cookies.txt", os.getenv("YTDL_COOKIE_FILE", "")]:
@@ -277,15 +209,15 @@ def get_ytdl_cookie_file() -> Optional[str]:
 
 def get_ytdl_opts(custom: Optional[Dict[str, Any]] = None, use_cookies: bool = False) -> Dict[str, Any]:
     opts: Dict[str, Any] = {
-        'format': 'bestaudio/251/140/best',
+        'format': 'bestaudio/best',
         'noplaylist': True,
         'quiet': True,
         'no_warnings': True,
-        'socket_timeout': 10,
+        'socket_timeout': 15,
         'source_address': '0.0.0.0',
         'extractor_args': {
             'youtube': {
-                'player_client': ['android', 'ios']
+                'player_client': ['mweb', 'web_embedded', 'android', 'ios']
             }
         },
         'http_headers': {
@@ -1928,8 +1860,7 @@ class TrackSearchSelect(discord.ui.Select):
 
         if not self.guild.voice_client:
             try:
-                player.voice_client = await voice_channel.connect(cls=voice_recv.VoiceRecvClient, timeout=15.0, reconnect=True)
-                self.cog.start_voice_listening(self.guild, player.voice_client)
+                player.voice_client = await voice_channel.connect(timeout=15.0, reconnect=True)
             except Exception as e:
                 return await interaction.response.send_message(
                     f"{E_ALERT} Failed to join voice channel: `{e}`",
@@ -2920,26 +2851,6 @@ class MusicCog(commands.Cog, name="Music"):
                     pass
 
     async def voice_listener_watchdog(self):
-        """Continuous watchdog to ensure voice listener never dies or terminates in between."""
-        await self.bot.wait_until_ready()
-        print("[VOICE WATCHDOG] ✅ Continuous Voice Listener Watchdog started.", flush=True)
-        while not self.bot.is_closed():
-            try:
-                for guild in self.bot.guilds:
-                    vc = guild.voice_client
-                    if is_vc_connected(vc) and isinstance(vc, voice_recv.VoiceRecvClient):
-                        if not vc.is_listening():
-                            print(f"[VOICE WATCHDOG] ⚠️ Re-attaching voice listener for '{guild.name}'", flush=True)
-                            self.start_voice_listening(guild, vc)
-                        if hasattr(vc, '_connection') and hasattr(vc._connection, '_socket_reader'):
-                            sr = vc._connection._socket_reader
-                            if getattr(sr, '_idle_paused', False):
-                                sr.resume(force=True)
-            except Exception as e:
-                pass
-            await asyncio.sleep(4)
-
-    def start_voice_listening(self, guild: discord.Guild, voice_client: Any):
         pass
 
 
@@ -3217,8 +3128,7 @@ class MusicCog(commands.Cog, name="Music"):
                         if member.voice and member.voice.channel:
                             player.is_connecting = True
                             try:
-                                player.voice_client = await member.voice.channel.connect(cls=voice_recv.VoiceRecvClient, timeout=15.0, reconnect=True)
-                                self.start_voice_listening(guild, player.voice_client)
+                                player.voice_client = await member.voice.channel.connect(timeout=15.0, reconnect=True)
                                 vc = player.voice_client
                             except Exception as e:
                                 print(f"[Voice Auto-Connect Error] {e}", flush=True)
@@ -3273,11 +3183,9 @@ class MusicCog(commands.Cog, name="Music"):
                     if getattr(player, 'is_connecting', False):
                         continue
 
-                    # If already connected to voice in this guild, keep it and ensure listening
+                    # If already connected to voice in this guild, keep it
                     if vc and getattr(vc, 'channel', None):
                         player.voice_client = vc
-                        if isinstance(vc, voice_recv.VoiceRecvClient) and not vc.is_listening():
-                            self.start_voice_listening(guild, vc)
                         continue
 
                     player.is_connecting = True
@@ -3288,12 +3196,11 @@ class MusicCog(commands.Cog, name="Music"):
                             except Exception:
                                 pass
                             await asyncio.sleep(0.5)
-                        player.voice_client = await channel.connect(cls=voice_recv.VoiceRecvClient, timeout=20.0, reconnect=True)
-                        self.start_voice_listening(guild, player.voice_client)
+                        player.voice_client = await channel.connect(timeout=20.0, reconnect=True)
                         if text_id:
                             player.home_channel = guild.get_channel(text_id)
                         player.cancel_idle_timer()
-                        print(f"[24/7 Watchdog] Reconnected with VoiceRecvClient to '{channel.name}' in '{guild.name}'.", flush=True)
+                        print(f"[24/7 Watchdog] Reconnected to '{channel.name}' in '{guild.name}'.", flush=True)
                     except Exception as ex:
                         print(f"[24/7 Watchdog Connect Error] {ex}", flush=True)
                     finally:
@@ -3316,22 +3223,19 @@ class MusicCog(commands.Cog, name="Music"):
 
                 player = self.get_player(guild)
                 vc = guild.voice_client
-                if not is_vc_connected(vc) or not isinstance(vc, voice_recv.VoiceRecvClient):
+                if not is_vc_connected(vc):
                     if vc:
                         try:
                             await vc.disconnect(force=True)
                         except Exception:
                             pass
                         await asyncio.sleep(0.5)
-                    player.voice_client = await channel.connect(cls=voice_recv.VoiceRecvClient, timeout=20.0, reconnect=True)
-                    self.start_voice_listening(guild, player.voice_client)
+                    player.voice_client = await channel.connect(timeout=20.0, reconnect=True)
                     if text_id:
                         player.home_channel = guild.get_channel(text_id)
                     print(f"[24/7 Reconnect] Connected to '{channel.name}' in '{guild.name}'.")
                 else:
                     player.voice_client = vc
-                    if not vc.is_listening():
-                        self.start_voice_listening(guild, vc)
             except Exception as e:
                 print(f"[24/7 Reconnect Error] guild {guild_id}: {e}")
 
@@ -4774,14 +4678,6 @@ class MusicCog(commands.Cog, name="Music"):
         if not track:
             return await ctx.send(embed=discord.Embed(description=f"{E_ALERT} No playable results found for `{query}`.", color=ANKUSH_COLOR))
 
-        # Aesthetic minimal white-line queue embed requested by user
-        embed = discord.Embed(
-            description=f"Added [{track.title}]({track.uri}) to the queue.",
-            color=discord.Color.from_rgb(255, 255, 255)
-        )
-        embed.set_footer(text="Developed by Bunny")
-        await ctx.send(embed=embed)
-
         is_actually_playing = False
         if player.voice_client:
             if hasattr(player.voice_client, "is_playing") and player.voice_client.is_playing():
@@ -4792,8 +4688,14 @@ class MusicCog(commands.Cog, name="Music"):
         if is_actually_playing:
             player.queue.append(track)
             player.prefetched_autoplay = None
+            embed = discord.Embed(
+                description=f"Added [{track.title}]({track.uri}) to the queue.",
+                color=discord.Color.from_rgb(255, 255, 255)
+            )
+            embed.set_footer(text="Developed by Bunny")
+            await ctx.send(embed=embed)
         else:
-            self.bot.loop.create_task(player.play_track(track))
+            await player.play_track(track)
 
     @commands.command(name="pause")
     async def pause_cmd(self, ctx: commands.Context):
@@ -5545,8 +5447,7 @@ class MusicCog(commands.Cog, name="Music"):
             # Auto-join user's voice channel immediately
             if not is_vc_connected(ctx.guild.voice_client):
                 try:
-                    player.voice_client = await target_vc.connect(cls=voice_recv.VoiceRecvClient, timeout=20.0, reconnect=True)
-                    self.start_voice_listening(ctx.guild, player.voice_client)
+                    player.voice_client = await target_vc.connect(timeout=20.0, reconnect=True)
                 except Exception as e:
                     if ctx.guild.voice_client:
                         player.voice_client = ctx.guild.voice_client
