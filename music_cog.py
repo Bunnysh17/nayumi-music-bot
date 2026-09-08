@@ -213,11 +213,12 @@ def get_ytdl_opts(custom: Optional[Dict[str, Any]] = None, use_cookies: bool = F
         'noplaylist': True,
         'quiet': True,
         'no_warnings': True,
-        'socket_timeout': 15,
+        'socket_timeout': 6,
         'source_address': '0.0.0.0',
         'extractor_args': {
             'youtube': {
-                'player_client': ['android', 'mweb']
+                'player_client': ['android'],
+                'player_skip': ['webpage', 'configs']
             }
         },
         'http_headers': {
@@ -1357,15 +1358,20 @@ class GuildPlayer:
                 else:
                     target_query = f"ytsearch1:{track.title} {track.author or ''}"
 
-                for clients in [['android'], ['android', 'mweb'], ['web_creator', 'android']]:
+                for clients in [['android'], ['android', 'ios']]:
                     for use_ck in [False, True]:
                         try:
                             ydl_cfg = get_ytdl_opts({
                                 'format': 'bestaudio/best',
                                 'noplaylist': True,
                                 'quiet': True,
-                                'socket_timeout': 15,
-                                'extractor_args': {'youtube': {'player_client': clients}}
+                                'socket_timeout': 6,
+                                'extractor_args': {
+                                    'youtube': {
+                                        'player_client': clients,
+                                        'player_skip': ['webpage', 'configs']
+                                    }
+                                }
                             }, use_cookies=use_ck)
                             with yt_dlp.YoutubeDL(ydl_cfg) as ydl:
                                 info = ydl.extract_info(target_query, download=False)
@@ -3886,7 +3892,7 @@ class MusicCog(commands.Cog, name="Music"):
 
             # 1. Primary: Extract exact direct stream via yt-dlp (multi-client for cloud hosting & new releases)
             def _extract_yt_stream():
-                for clients in [['android'], ['android', 'mweb'], ['web_creator', 'android']]:
+                for clients in [['android'], ['android', 'ios']]:
                     for use_ck in [False, True]:
                         try:
                             ydl_opts = get_ytdl_opts({
@@ -3894,8 +3900,13 @@ class MusicCog(commands.Cog, name="Music"):
                                 'quiet': True,
                                 'no_warnings': True,
                                 'noplaylist': True,
-                                'socket_timeout': 15,
-                                'extractor_args': {'youtube': {'player_client': clients}}
+                                'socket_timeout': 6,
+                                'extractor_args': {
+                                    'youtube': {
+                                        'player_client': clients,
+                                        'player_skip': ['webpage', 'configs']
+                                    }
+                                }
                             }, use_cookies=use_ck)
                             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                                 info = ydl.extract_info(canonical_yt_url, download=False)
@@ -3982,14 +3993,19 @@ class MusicCog(commands.Cog, name="Music"):
 
         def _extract():
             if is_url:
-                for use_ck in [True, False]:
+                for use_ck in [False, True]:
                     try:
                         flat_opts = get_ytdl_opts({
                             'quiet': True,
                             'extract_flat': True,
                             'noplaylist': True,
-                            'socket_timeout': 10,
-                            'extractor_args': {'youtube': {'player_client': ['android', 'ios', 'web', 'mweb']}}
+                            'socket_timeout': 6,
+                            'extractor_args': {
+                                'youtube': {
+                                    'player_client': ['android'],
+                                    'player_skip': ['webpage', 'configs']
+                                }
+                            }
                         }, use_cookies=use_ck)
                         with yt_dlp.YoutubeDL(flat_opts) as ydl:
                             info = ydl.extract_info(search_target, download=False)
@@ -4001,7 +4017,7 @@ class MusicCog(commands.Cog, name="Music"):
                         pass
                 return None
 
-            # Fast search on YouTube with multi-client
+            # Fast search on YouTube with android client
             for use_ck in [False, True]:
                 try:
                     search_opts = get_ytdl_opts({
@@ -4009,8 +4025,13 @@ class MusicCog(commands.Cog, name="Music"):
                         'quiet': True,
                         'extract_flat': False,
                         'noplaylist': True,
-                        'socket_timeout': 15,
-                        'extractor_args': {'youtube': {'player_client': ['mweb', 'web_embedded', 'android', 'ios']}}
+                        'socket_timeout': 6,
+                        'extractor_args': {
+                            'youtube': {
+                                'player_client': ['android'],
+                                'player_skip': ['webpage', 'configs']
+                            }
+                        }
                     }, use_cookies=use_ck)
                     with yt_dlp.YoutubeDL(search_opts) as ydl:
                         info = ydl.extract_info(f"ytsearch1:{search_target}", download=False)
@@ -4239,8 +4260,13 @@ class MusicCog(commands.Cog, name="Music"):
                 'extract_flat': True,
                 'playlist_items': '1:8',
                 'noplaylist': False,
-                'socket_timeout': 8,
-                'extractor_args': {'youtube': {'player_client': ['android', 'ios', 'tv_embedded', 'mweb']}}
+                'socket_timeout': 6,
+                'extractor_args': {
+                    'youtube': {
+                        'player_client': ['android'],
+                        'player_skip': ['webpage', 'configs']
+                    }
+                }
             })
             targets = []
             if related_artists:
@@ -4419,7 +4445,13 @@ class MusicCog(commands.Cog, name="Music"):
                 'extract_flat': True,
                 'noplaylist': True,
                 'default_search': 'ytsearch',
-                'extractor_args': {'youtube': {'player_client': ['android', 'ios']}}
+                'socket_timeout': 6,
+                'extractor_args': {
+                    'youtube': {
+                        'player_client': ['android'],
+                        'player_skip': ['webpage', 'configs']
+                    }
+                }
             })
             results = []
             with yt_dlp.YoutubeDL(flat_opts) as ydl:
