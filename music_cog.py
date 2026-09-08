@@ -1367,9 +1367,7 @@ class GuildPlayer:
                 self.voice_client = self.guild.voice_client
             elif self.voice_client and getattr(self.voice_client, "channel", None):
                 try:
-                    self.voice_client = await self.voice_client.channel.connect(cls=voice_recv.VoiceRecvClient, timeout=15.0, reconnect=True)
-                    if hasattr(self.cog, 'start_voice_listening'):
-                        self.cog.start_voice_listening(self.guild, self.voice_client)
+                    self.voice_client = await self.voice_client.channel.connect(timeout=15.0, reconnect=True)
                 except Exception as ex:
                     print(f"[play_track] Reconnection error: {ex}")
                     return
@@ -2928,25 +2926,7 @@ class MusicCog(commands.Cog, name="Music"):
             await asyncio.sleep(4)
 
     def start_voice_listening(self, guild: discord.Guild, voice_client: Any):
-        """Starts real-time voice speech recognition sink on the voice client."""
-        if isinstance(voice_client, voice_recv.VoiceRecvClient):
-            if not voice_client.is_listening():
-                try:
-                    sink = VoiceCommandSink(self, guild, voice_client)
-                    voice_client.listen(sink)
-                    if hasattr(voice_client, '_connection') and hasattr(voice_client._connection, '_socket_reader'):
-                        sr = voice_client._connection._socket_reader
-                        sr.resume(force=True)
-                    print(f"[VOICE COMMAND ENGINE] ✅ Active speech listener started in '{guild.name}'.", flush=True)
-                except Exception as e:
-                    import traceback
-                    print(f"[VOICE COMMAND ENGINE ERROR] {e}", flush=True)
-                    traceback.print_exc()
-            else:
-                if hasattr(voice_client, '_connection') and hasattr(voice_client._connection, '_socket_reader'):
-                    sr = voice_client._connection._socket_reader
-                    if getattr(sr, '_idle_paused', False):
-                        sr.resume(force=True)
+        pass
 
 
 
@@ -3936,6 +3916,8 @@ class MusicCog(commands.Cog, name="Music"):
                 query = spotify_items[0]['query']
 
         search_target = query.strip()
+        search_target = re.sub(r'(?i)\s+to\s+the\s+queue\.?$', '', search_target).strip()
+        search_target = re.sub(r'(?i)^added\s+', '', search_target).strip()
         is_url = search_target.startswith("http://") or search_target.startswith("https://")
 
         is_yt_title = any(k in search_target.lower() for k in ['|', 'visualizer', 'official', 'teaser', 'remix', 'prod.', 'prod by', 'feat.', 'ft.'])
@@ -4582,10 +4564,7 @@ class MusicCog(commands.Cog, name="Music"):
                     pass
                 await asyncio.sleep(0.5)
             try:
-                try:
-                    player.voice_client = await voice_channel.connect(timeout=15.0, reconnect=True)
-                except Exception:
-                    player.voice_client = await voice_channel.connect(cls=voice_recv.VoiceRecvClient, timeout=15.0, reconnect=True)
+                player.voice_client = await voice_channel.connect(timeout=15.0, reconnect=True)
             except Exception as e:
                 embed = discord.Embed(description=f"{E_ALERT} Failed to join voice channel: `{e}`", color=ANKUSH_COLOR)
                 await ctx.send(embed=embed)
