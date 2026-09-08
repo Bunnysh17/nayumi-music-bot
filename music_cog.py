@@ -686,6 +686,50 @@ def clean_for_search(title: str, author: str = "") -> str:
             q = f"{q} {clean_auth}".strip()
     return q
 
+def extract_clean_song_queries(title: str, author: str = "") -> List[str]:
+    if not title:
+        return []
+    t = re.sub(r'[\(\[\{][^\)\]\}]*[\)\]\}]', ' ', title)
+    noise = [
+        'official visualizer', 'official video', 'music video', 'lyrical video', 'lyrics video', 'lyric video',
+        'full video', 'video song', 'audio song', 'trending song', 'full song', 'visualizer',
+        'hd video', '4k video', 'official audio', 'official', 'audio', 'video', 'lyrics', 'song',
+        'latest haryanvi song', 'latest hindi song', 'latest punjabi song', 'latest song',
+        '2024', '2025', '2026', '2027', 'feat', 'ft', 'prod by', 'prod'
+    ]
+    for n in noise:
+        t = re.sub(rf'(?i)\b{n}\b', ' ', t)
+    
+    parts = [p.strip() for p in re.split(r'[:|•\-–—/~]', t) if p.strip()]
+    queries: List[str] = []
+    
+    auth_clean = ""
+    if author and len(author) > 2:
+        auth_clean = re.sub(r'(?i)\s*-\s*topic$', '', author).strip()
+        auth_clean = re.sub(r'(?i)vevo$', '', auth_clean).strip()
+        auth_clean = re.sub(r'[^\w\s]', ' ', auth_clean).strip()
+        if any(lbl in auth_clean.lower() for lbl in ['tseries', 't-series', 'sony music', 'zee music', 'speed records', 'tips', 'saregama', 'official', 'youtube', 'vevo']):
+            auth_clean = ""
+
+    if parts:
+        main_title = ' '.join(re.sub(r'[^\w\s]', ' ', parts[0]).split())
+        if main_title:
+            if auth_clean:
+                queries.append(f"{main_title} {auth_clean}".strip())
+            if len(parts) > 1:
+                sub_part = ' '.join(re.sub(r'[^\w\s]', ' ', parts[1]).split())
+                if sub_part and sub_part.lower() != main_title.lower():
+                    queries.append(f"{main_title} {sub_part}".strip())
+            queries.append(main_title)
+
+    clean_full = ' '.join(re.sub(r'[^\w\s]', ' ', t).split())
+    if clean_full and clean_full not in queries:
+        queries.append(clean_full)
+    if auth_clean and clean_full and auth_clean.lower() not in clean_full.lower():
+        queries.append(f"{clean_full} {auth_clean}".strip())
+
+    return queries
+
 def is_unwanted_remake(track_title: str, query: str = "", author: str = "") -> bool:
     t = (track_title or "").lower()
     q = (query or "").lower()
@@ -1396,22 +1440,28 @@ class GuildPlayer:
                 track.direct_url_time = time.time()
 
             if not stream_target:
-                clean_q = clean_for_search(track.title, track.author or "")
-                try:
-                    saavn_fallback = await self.cog.resolve_saavn_track(clean_q, track.requester)
-                    if saavn_fallback and saavn_fallback.direct_url:
-                        stream_target = saavn_fallback.direct_url
-                        track.direct_url = stream_target
-                        track.direct_url_time = time.time()
-                except Exception:
-                    pass
+                clean_queries = extract_clean_song_queries(track.title, track.author or "")
+                for cq in clean_queries:
+                    try:
+                        saavn_fallback = await self.cog.resolve_saavn_track(cq, track.requester)
+                        if saavn_fallback and saavn_fallback.direct_url:
+                            stream_target = saavn_fallback.direct_url
+                            track.direct_url = stream_target
+                            track.direct_url_time = time.time()
+                            if not track.thumbnail and saavn_fallback.thumbnail:
+                                track.thumbnail = saavn_fallback.thumbnail
+                            break
+                    except Exception:
+                        pass
 
             if not stream_target:
                 def _extract_sc():
                     try:
+                        clean_queries = extract_clean_song_queries(track.title, track.author or "")
+                        target_sc_q = clean_queries[0] if clean_queries else f"{track.title} {track.author or ''}"
                         sc_opts = get_sc_opts({'format': 'bestaudio/best', 'quiet': True})
                         with yt_dlp.YoutubeDL(sc_opts) as ydl:
-                            info = ydl.extract_info(f"scsearch1:{track.title} {track.author or ''}", download=False)
+                            info = ydl.extract_info(f"scsearch1:{target_sc_q}", download=False)
                             if info and 'entries' in info and info['entries']:
                                 return info['entries'][0].get('url')
                             elif info:
@@ -3953,7 +4003,20 @@ class MusicCog(commands.Cog, name="Music"):
             o_author = oembed_meta.get('author_name', 'YouTube') if oembed_meta else 'YouTube'
             o_thumb = oembed_meta.get('thumbnail_url', f"https://i.ytimg.com/vi/{yt_vid_id}/hqdefault.jpg") if oembed_meta else f"https://i.ytimg.com/vi/{yt_vid_id}/hqdefault.jpg"
 
-            # 3. HTML scraper if oEmbed didn't resolve title
+            # 3. NoEmbed / HTML fallback for title
+            if not o_title:
+                def _fetch_noembed():
+                    try:
+                        req = urllib.request.Request(f"https://noembed.com/embed?url={urllib.parse.quote(canonical_yt_url)}", headers={'User-Agent': 'Mozilla/5.0'})
+                        resp = urllib.request.urlopen(req, timeout=3)
+                        dat = json.loads(resp.read().decode('utf-8', errors='ignore'))
+                        return dat.get('title'), dat.get('author_name')
+                    except Exception:
+                        return None, None
+                o_title, noembed_auth = await loop.run_in_executor(None, _fetch_noembed)
+                if noembed_auth and (not o_author or o_author == "YouTube"):
+                    o_author = noembed_auth
+
             if not o_title:
                 def _scrape_yt_html():
                     try:
@@ -3971,6 +4034,48 @@ class MusicCog(commands.Cog, name="Music"):
                         pass
                     return None
                 o_title = await loop.run_in_executor(None, _scrape_yt_html)
+
+            # 4. Instant high-quality audio stream resolution via JioSaavn or SoundCloud
+            if o_title:
+                clean_queries = extract_clean_song_queries(o_title, o_author)
+                for cq in clean_queries:
+                    try:
+                        saavn_match = await self.resolve_saavn_track(cq, requester)
+                        if saavn_match and saavn_match.direct_url:
+                            saavn_match.uri = canonical_yt_url
+                            if o_thumb:
+                                saavn_match.thumbnail = o_thumb
+                            return saavn_match
+                    except Exception:
+                        pass
+
+                def _extract_sc_for_yt():
+                    try:
+                        sc_opts = get_sc_opts({'format': 'bestaudio/best', 'quiet': True})
+                        with yt_dlp.YoutubeDL(sc_opts) as ydl:
+                            info = ydl.extract_info(f"scsearch1:{clean_queries[0] if clean_queries else o_title}", download=False)
+                            if info and 'entries' in info and info['entries']:
+                                return info['entries'][0]
+                            elif info:
+                                return info
+                    except Exception:
+                        pass
+                    return None
+
+                sc_res = await loop.run_in_executor(None, _extract_sc_for_yt)
+                if sc_res and sc_res.get('url'):
+                    sc_tr = Track(
+                        title=o_title,
+                        uri=canonical_yt_url,
+                        author=o_author,
+                        duration_sec=int(sc_res.get('duration') or 210),
+                        stream_url=sc_res.get('url'),
+                        requester=requester,
+                        thumbnail=o_thumb
+                    )
+                    sc_tr.direct_url = sc_res.get('url')
+                    sc_tr.direct_url_time = time.time()
+                    return sc_tr
 
             return Track(
                 title=o_title or f"YouTube Video ({yt_vid_id})",
