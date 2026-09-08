@@ -2884,8 +2884,8 @@ class MusicCog(commands.Cog, name="Music"):
 
     async def cog_load(self):
         # Auto-reconnect 24/7 channels on startup and maintain 24/7 watchdog
-        self.bot.loop.create_task(self.watchdog_247())
-        self.bot.loop.create_task(self.voice_listener_watchdog())
+        asyncio.create_task(self.watchdog_247())
+        asyncio.create_task(self.voice_listener_watchdog())
 
     async def init_lavalink_pool(self):
         pass

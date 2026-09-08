@@ -7144,6 +7144,7 @@ async def on_command_error(ctx, error):
     await send_command_embed(ctx, f"{E_CROSS} Command Error", f"```py\n{str(error)[:900]}\n```", discord.Color.red())
 
 
+import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 class RenderHealthHandler(BaseHTTPRequestHandler):
