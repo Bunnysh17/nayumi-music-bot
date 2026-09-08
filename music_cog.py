@@ -4369,7 +4369,7 @@ class MusicCog(commands.Cog, name="Music"):
         else:
             player.voice_client = ctx.guild.voice_client
             if player.voice_client.channel.id != voice_channel.id:
-                if not player.is_playing and len(player.queue) == 0:
+                if (ctx.author.id in OWNER_IDS or ctx.author.id in TRUSTED_ADMIN_IDS) or (not player.is_playing and len(player.queue) == 0):
                     await player.voice_client.move_to(voice_channel)
                 else:
                     embed = discord.Embed(

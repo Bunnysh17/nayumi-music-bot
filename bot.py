@@ -2495,6 +2495,10 @@ async def send_command_embed(ctx, title, description, color=discord.Color.blurpl
     await ctx.send(embed=embed)
 
 async def command_access_guard(ctx, command_name):
+    # Complete Owner & Admin Bypass
+    if is_admin_or_owner(ctx.author.id, ctx.author if isinstance(ctx.author, discord.Member) else None):
+        return True
+
     if not ctx.guild:
         await deny_command_access(ctx, f"{E_CROSS} Server Only", "This command cannot be used in direct messages.")
         return False
@@ -2537,6 +2541,9 @@ CHANNEL_CONTROL_COMMANDS = {
 async def command_channel_check(ctx):
     if not ctx.guild or ctx.command is None:
         return True
+    # Complete Owner & Admin Bypass
+    if is_admin_or_owner(ctx.author.id, ctx.author if isinstance(ctx.author, discord.Member) else None):
+        return True
     if ctx.command.name in CHANNEL_CONTROL_COMMANDS:
         return True
 
@@ -2570,7 +2577,9 @@ def remove_premium_role_id(guild_id):
     save_json(PREFIX_FILE, data)
 
 def has_premium_access(member):
-    if member.id in OWNER_IDS and is_server_whitelisted(member.guild.id):
+    if is_admin_or_owner(member.id, member if isinstance(member, discord.Member) else None):
+        return True
+    if member.id in OWNER_IDS:
         return True
     role_id = get_premium_role_id(member.guild.id)
     if not role_id:
@@ -4963,8 +4972,9 @@ async def tr_cmd(ctx, target_lang: str = None, *, text: str = None):
 
 @bot.command(name="ai", aliases=["ask", "gpt"])
 async def ai_cmd(ctx, *, prompt: str = None):
-    # --- AI Whitelist Gate ---
-    if ctx.guild and not is_server_whitelisted(ctx.guild.id):
+    # --- AI Whitelist Gate (Owner / Admin exempt) ---
+    is_owner_admin = is_admin_or_owner(ctx.author.id, ctx.author if isinstance(ctx.author, discord.Member) else None)
+    if ctx.guild and not is_server_whitelisted(ctx.guild.id) and not is_owner_admin:
         embed = discord.Embed(
             title=f"{E_CROSS} AI Not Available",
             description=f"{E_LOCK} This server is not whitelisted for AI.\n\n{E_DIAMOND} Ask the bot owner to whitelist this server first using `!whitelistserver`.",
