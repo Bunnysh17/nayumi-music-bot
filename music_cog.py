@@ -3383,21 +3383,11 @@ class MusicCog(commands.Cog, name="Music"):
             embed = discord.Embed(description="No music is currently playing in this server.", color=ANKUSH_COLOR)
             return await channel.send(embed=embed)
 
-        try:
-            from discord.http import Route
-            route = Route('POST', f'/channels/{channel.id}/messages')
-            payload = self.make_nowplaying_v2_payload(player)
-            data = await self.bot.http.request(route, json=payload)
-            msg = discord.Message(state=channel._state, channel=channel, data=data)
-            player.last_np_msg = msg
-            return msg
-        except Exception as e:
-            print(f"[send_nowplaying_card] V2 card API error: {e}. Falling back to standard embed.")
-            embed = self.make_nowplaying_embed(player)
-            view = MusicControlView(self, channel.guild.id)
-            msg = await channel.send(embed=embed, view=view)
-            player.last_np_msg = msg
-            return msg
+        embed = self.make_nowplaying_embed(player)
+        view = MusicControlView(self, channel.guild.id)
+        msg = await channel.send(embed=embed, view=view)
+        player.last_np_msg = msg
+        return msg
 
     async def update_nowplaying_card(self, channel_id: int, message_id: int, player: GuildPlayer):
         track = player.current
@@ -3407,19 +3397,12 @@ class MusicCog(commands.Cog, name="Music"):
         if not channel:
             return
         try:
-            from discord.http import Route
-            route = Route('PATCH', f'/channels/{channel_id}/messages/{message_id}')
-            payload = self.make_nowplaying_v2_payload(player)
-            await self.bot.http.request(route, json=payload)
+            msg = await channel.fetch_message(message_id)
+            embed = self.make_nowplaying_embed(player)
+            view = MusicControlView(self, channel.guild.id)
+            await msg.edit(embed=embed, view=view)
         except Exception as e:
-            print(f"[update_nowplaying_card] V2 update error: {e}")
-            try:
-                msg = await channel.fetch_message(message_id)
-                embed = self.make_nowplaying_embed(player)
-                view = MusicControlView(self, channel.guild.id)
-                await msg.edit(embed=embed, view=view)
-            except Exception:
-                pass
+            print(f"[update_nowplaying_card] error: {e}", flush=True)
 
     @commands.Cog.listener()
     async def on_interaction(self, interaction: discord.Interaction):
@@ -4672,10 +4655,14 @@ class MusicCog(commands.Cog, name="Music"):
             embed.set_footer(text="Developed by Bunny • Nayumi Music")
             return await loading_msg.edit(embed=embed)
 
+        loading_msg = await ctx.send(embed=discord.Embed(
+            description=f"🔍 Searching and loading **{query[:80]}**...",
+            color=discord.Color.from_rgb(255, 255, 255)
+        ))
         track = await self.search_track(query, ctx.author)
 
         if not track:
-            return await ctx.send(embed=discord.Embed(description=f"{E_ALERT} No playable results found for `{query}`.", color=ANKUSH_COLOR))
+            return await loading_msg.edit(embed=discord.Embed(description=f"{E_ALERT} No playable results found for `{query}`.", color=ANKUSH_COLOR))
 
         is_actually_playing = False
         if player.voice_client:
@@ -4688,12 +4675,16 @@ class MusicCog(commands.Cog, name="Music"):
             player.queue.append(track)
             player.prefetched_autoplay = None
             embed = discord.Embed(
-                description=f"Added [{track.title}]({track.uri}) to the queue.",
+                description=f"Added [{track.title}]({track.uri}) to the queue. (`#{len(player.queue)}` in queue)",
                 color=discord.Color.from_rgb(255, 255, 255)
             )
             embed.set_footer(text="Developed by Bunny")
-            await ctx.send(embed=embed)
+            await loading_msg.edit(embed=embed)
         else:
+            try:
+                await loading_msg.delete()
+            except Exception:
+                pass
             await player.play_track(track)
 
     @commands.command(name="pause")
