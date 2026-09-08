@@ -1360,11 +1360,11 @@ class GuildPlayer:
                 for use_ck in [False, True]:
                     try:
                         ydl_cfg = get_ytdl_opts({
-                            'format': 'bestaudio/251/140/best',
+                            'format': 'bestaudio/best',
                             'noplaylist': True,
                             'quiet': True,
-                            'socket_timeout': 10,
-                            'extractor_args': {'youtube': {'player_client': ['android', 'ios']}}
+                            'socket_timeout': 15,
+                            'extractor_args': {'youtube': {'player_client': ['mweb', 'web_embedded', 'android', 'ios']}}
                         }, use_cookies=use_ck)
                         with yt_dlp.YoutubeDL(ydl_cfg) as ydl:
                             info = ydl.extract_info(target_query, download=False)
@@ -1377,8 +1377,8 @@ class GuildPlayer:
                                 if not track.thumbnail and info.get('thumbnail'):
                                     track.thumbnail = info.get('thumbnail')
                                 return info.get('url')
-                    except Exception:
-                        pass
+                    except Exception as ex:
+                        print(f"[play_track] _extract_live_audio error: {ex}", flush=True)
                 return None
 
             live_url = await loop.run_in_executor(None, _extract_live_audio)
@@ -2815,8 +2815,7 @@ class MusicCog(commands.Cog, name="Music"):
         self.bot = bot
         self.players: Dict[int, GuildPlayer] = {}
         self.ydl_opts = {
-            'format': 'bestaudio/251/bestaudio[ext=webm]/bestaudio[ext=m4a]/140/best',
-            'format_sort': ['abr:desc', 'asr:desc', 'quality:desc'],
+            'format': 'bestaudio/best',
             'noplaylist': True,
             'quiet': True,
             'default_search': 'ytsearch',
@@ -3867,12 +3866,12 @@ class MusicCog(commands.Cog, name="Music"):
                 for use_ck in [False, True]:
                     try:
                         ydl_opts = get_ytdl_opts({
-                            'format': 'bestaudio/251/140/best',
+                            'format': 'bestaudio/best',
                             'quiet': True,
                             'no_warnings': True,
                             'noplaylist': True,
-                            'socket_timeout': 10,
-                            'extractor_args': {'youtube': {'player_client': ['android', 'ios']}}
+                            'socket_timeout': 15,
+                            'extractor_args': {'youtube': {'player_client': ['mweb', 'web_embedded', 'android', 'ios']}}
                         }, use_cookies=use_ck)
                         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                             info = ydl.extract_info(canonical_yt_url, download=False)
@@ -3982,12 +3981,12 @@ class MusicCog(commands.Cog, name="Music"):
             for use_ck in [False, True]:
                 try:
                     search_opts = get_ytdl_opts({
-                        'format': 'bestaudio/251/140/best',
+                        'format': 'bestaudio/best',
                         'quiet': True,
                         'extract_flat': False,
                         'noplaylist': True,
-                        'socket_timeout': 10,
-                        'extractor_args': {'youtube': {'player_client': ['android', 'ios']}}
+                        'socket_timeout': 15,
+                        'extractor_args': {'youtube': {'player_client': ['mweb', 'web_embedded', 'android', 'ios']}}
                     }, use_cookies=use_ck)
                     with yt_dlp.YoutubeDL(search_opts) as ydl:
                         info = ydl.extract_info(f"ytsearch1:{search_target}", download=False)
