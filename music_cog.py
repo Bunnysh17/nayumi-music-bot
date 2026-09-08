@@ -3841,20 +3841,27 @@ class MusicCog(commands.Cog, name="Music"):
                     q_words = [w for w in clean_q.lower().split() if len(w) > 1]
                     if not q_words:
                         return 0
-                    score = 0
-                    for w in q_words:
-                        if w in t:
-                            score += 3
-                        if w in a:
-                            score += 2
+                    
+                    title_matches = [w for w in q_words if w in t]
+                    artist_matches = [w for w in q_words if w in a]
+                    all_matches = set(title_matches + artist_matches)
+
+                    # If query contains multiple words (like title + artist), 
+                    # do NOT accept if extra words exist and artist didn't match at all
+                    if len(q_words) >= 2 and not artist_matches and len(title_matches) < len(q_words):
+                        return -50
+                    if len(q_words) >= 2 and len(all_matches) < (len(q_words) + 1) // 2:
+                        return -50
+
+                    score = (len(title_matches) * 3) + (len(artist_matches) * 4)
                     return score
 
                 scored = [(score_candidate(r), r) for r in results]
                 scored.sort(key=lambda x: x[0], reverse=True)
-                if scored and scored[0][0] > -50:
+                if scored and scored[0][0] > 0:
                     chosen = scored[0][1]
                 else:
-                    chosen = results[0]
+                    return None
 
                 title = html.unescape(chosen.get('song', ''))
                 artist = html.unescape(chosen.get('primary_artists', '') or chosen.get('singers', '') or chosen.get('music', '') or 'Unknown Artist')
@@ -3932,8 +3939,10 @@ class MusicCog(commands.Cog, name="Music"):
         search_target = query.strip()
         is_url = search_target.startswith("http://") or search_target.startswith("https://")
 
-        # Smart AI Lyrics Identification (When query contains lyrics or long phrases)
-        if not is_url and len(search_target.split()) >= 3:
+        is_yt_title = any(k in search_target.lower() for k in ['|', 'visualizer', 'official', 'teaser', 'remix', 'prod.', 'prod by', 'feat.', 'ft.'])
+
+        # Smart AI Lyrics Identification (Only when query is genuinely lyrics without title markers)
+        if not is_url and not is_yt_title and len(search_target.split()) >= 4:
             try:
                 resolved_song = await self.resolve_lyrics_to_song(search_target)
                 if resolved_song and resolved_song.lower() != search_target.lower():
@@ -4040,8 +4049,8 @@ class MusicCog(commands.Cog, name="Music"):
                 thumbnail=o_thumb
             )
 
-        # Fast Track Resolver (JioSaavn 320kbps First -> yt-dlp Flat Search Fallback)
-        if not is_url:
+        # Fast Track Resolver (JioSaavn strict matching for pure audio song queries)
+        if not is_url and not is_yt_title:
             try:
                 saavn_track = await self.resolve_saavn_track(search_target, requester)
                 if saavn_track:
@@ -4057,7 +4066,8 @@ class MusicCog(commands.Cog, name="Music"):
                             'quiet': True,
                             'extract_flat': True,
                             'noplaylist': True,
-                            'socket_timeout': 8,
+                            'socket_timeout': 10,
+                            'extractor_args': {'youtube': {'player_client': ['android', 'ios', 'web', 'mweb']}}
                         }, use_cookies=use_ck)
                         with yt_dlp.YoutubeDL(flat_opts) as ydl:
                             info = ydl.extract_info(search_target, download=False)
@@ -4069,23 +4079,25 @@ class MusicCog(commands.Cog, name="Music"):
                         pass
                 return None
 
-            # Fast flat search fallback on YouTube
-            try:
-                search_opts = get_ytdl_opts({
-                    'format': 'bestaudio/best',
-                    'quiet': True,
-                    'extract_flat': True,
-                    'noplaylist': True,
-                    'socket_timeout': 8,
-                }, use_cookies=False)
-                with yt_dlp.YoutubeDL(search_opts) as ydl:
-                    info = ydl.extract_info(f"ytsearch1:{search_target}", download=False)
-                    if info and 'entries' in info and info['entries']:
-                        return info['entries'][0]
-                    elif info:
-                        return info
-            except Exception as e:
-                print(f"yt-dlp extract search error: {e}", flush=True)
+            # Fast flat search fallback on YouTube with multi-client
+            for use_ck in [False, True]:
+                try:
+                    search_opts = get_ytdl_opts({
+                        'format': 'bestaudio/251/bestaudio[ext=webm]/bestaudio[ext=m4a]/140/18/best',
+                        'quiet': True,
+                        'extract_flat': True,
+                        'noplaylist': True,
+                        'socket_timeout': 10,
+                        'extractor_args': {'youtube': {'player_client': ['android', 'ios', 'web', 'mweb']}}
+                    }, use_cookies=use_ck)
+                    with yt_dlp.YoutubeDL(search_opts) as ydl:
+                        info = ydl.extract_info(f"ytsearch1:{search_target}", download=False)
+                        if info and 'entries' in info and info['entries']:
+                            return info['entries'][0]
+                        elif info:
+                            return info
+                except Exception as e:
+                    print(f"yt-dlp extract search error: {e}", flush=True)
 
             # Fast SoundCloud Search Fallback
             try:
