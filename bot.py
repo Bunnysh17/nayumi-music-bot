@@ -7144,8 +7144,35 @@ async def on_command_error(ctx, error):
     await send_command_embed(ctx, f"{E_CROSS} Command Error", f"```py\n{str(error)[:900]}\n```", discord.Color.red())
 
 
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
+class RenderHealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b"Nayumi Music Bot is Online and Healthy 24/7!")
+
+    def do_HEAD(self):
+        self.send_response(200)
+        self.end_headers()
+
+    def log_message(self, format, *args):
+        pass
+
+def run_health_server():
+    port = int(os.environ.get("PORT", 10000))
+    try:
+        server = HTTPServer(("0.0.0.0", port), RenderHealthHandler)
+        print(f"[Render Health Server] Listening on 0.0.0.0:{port} for 24/7 keepalive.", flush=True)
+        server.serve_forever()
+    except Exception as e:
+        print(f"[Render Health Server Error] {e}", flush=True)
+
+
 if __name__ == "__main__":
     ensure_single_instance()
+    threading.Thread(target=run_health_server, daemon=True).start()
     bot.run(DISCORD_TOKEN)
 
 
