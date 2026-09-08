@@ -217,7 +217,7 @@ def get_ytdl_opts(custom: Optional[Dict[str, Any]] = None, use_cookies: bool = F
         'source_address': '0.0.0.0',
         'extractor_args': {
             'youtube': {
-                'player_client': ['mweb', 'web_embedded', 'android', 'ios']
+                'player_client': ['android', 'mweb']
             }
         },
         'http_headers': {
@@ -1357,28 +1357,30 @@ class GuildPlayer:
                 else:
                     target_query = f"ytsearch1:{track.title} {track.author or ''}"
 
-                for use_ck in [False, True]:
-                    try:
-                        ydl_cfg = get_ytdl_opts({
-                            'format': 'bestaudio/best',
-                            'noplaylist': True,
-                            'quiet': True,
-                            'socket_timeout': 15,
-                            'extractor_args': {'youtube': {'player_client': ['mweb', 'web_embedded', 'android', 'ios']}}
-                        }, use_cookies=use_ck)
-                        with yt_dlp.YoutubeDL(ydl_cfg) as ydl:
-                            info = ydl.extract_info(target_query, download=False)
-                            if info and 'entries' in info and info['entries']:
-                                entry = info['entries'][0]
-                                if not track.thumbnail and entry.get('thumbnail'):
-                                    track.thumbnail = entry.get('thumbnail')
-                                return entry.get('url')
-                            elif info:
-                                if not track.thumbnail and info.get('thumbnail'):
-                                    track.thumbnail = info.get('thumbnail')
-                                return info.get('url')
-                    except Exception as ex:
-                        print(f"[play_track] _extract_live_audio error: {ex}", flush=True)
+                for clients in [['android'], ['android', 'mweb'], ['web_creator', 'android']]:
+                    for use_ck in [False, True]:
+                        try:
+                            ydl_cfg = get_ytdl_opts({
+                                'format': 'bestaudio/best',
+                                'noplaylist': True,
+                                'quiet': True,
+                                'socket_timeout': 15,
+                                'extractor_args': {'youtube': {'player_client': clients}}
+                            }, use_cookies=use_ck)
+                            with yt_dlp.YoutubeDL(ydl_cfg) as ydl:
+                                info = ydl.extract_info(target_query, download=False)
+                                if info and 'entries' in info and info['entries']:
+                                    entry = info['entries'][0]
+                                    if not track.thumbnail and entry.get('thumbnail'):
+                                        track.thumbnail = entry.get('thumbnail')
+                                    if entry.get('url'):
+                                        return entry.get('url')
+                                elif info and info.get('url'):
+                                    if not track.thumbnail and info.get('thumbnail'):
+                                        track.thumbnail = info.get('thumbnail')
+                                    return info.get('url')
+                        except Exception as ex:
+                            print(f"[play_track] _extract_live_audio ({clients}) error: {ex}", flush=True)
                 return None
 
             live_url = await loop.run_in_executor(None, _extract_live_audio)
@@ -3396,7 +3398,34 @@ class MusicCog(commands.Cog, name="Music"):
 
         embed = self.make_nowplaying_embed(player)
         view = MusicControlView(self, channel.guild.id)
-        msg = await channel.send(embed=embed, view=view)
+        file = None
+        try:
+            loop = asyncio.get_event_loop()
+            curr_pos = int(time.time() - player.start_time) * 1000 if player.start_time else 0
+            buf = await loop.run_in_executor(
+                None,
+                create_music_card,
+                track.title,
+                track.author or "",
+                curr_pos,
+                track.length,
+                track.thumbnail,
+                track.requester.display_name if track.requester else "User",
+                player.loop_mode,
+                player.volume,
+                player.is_paused
+            )
+            if buf:
+                buf.seek(0)
+                file = discord.File(buf, filename="card.png")
+                embed.set_image(url="attachment://card.png")
+        except Exception as card_err:
+            print(f"[send_nowplaying_card] Image card error: {card_err}", flush=True)
+
+        if file:
+            msg = await channel.send(file=file, embed=embed, view=view)
+        else:
+            msg = await channel.send(embed=embed, view=view)
         player.last_np_msg = msg
         return msg
 
@@ -3857,22 +3886,23 @@ class MusicCog(commands.Cog, name="Music"):
 
             # 1. Primary: Extract exact direct stream via yt-dlp (multi-client for cloud hosting & new releases)
             def _extract_yt_stream():
-                for use_ck in [False, True]:
-                    try:
-                        ydl_opts = get_ytdl_opts({
-                            'format': 'bestaudio/best',
-                            'quiet': True,
-                            'no_warnings': True,
-                            'noplaylist': True,
-                            'socket_timeout': 15,
-                            'extractor_args': {'youtube': {'player_client': ['mweb', 'web_embedded', 'android', 'ios']}}
-                        }, use_cookies=use_ck)
-                        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                            info = ydl.extract_info(canonical_yt_url, download=False)
-                            if info:
-                                return info
-                    except Exception as ex:
-                        print(f"Direct yt-dlp URL extract attempt error: {ex}", flush=True)
+                for clients in [['android'], ['android', 'mweb'], ['web_creator', 'android']]:
+                    for use_ck in [False, True]:
+                        try:
+                            ydl_opts = get_ytdl_opts({
+                                'format': 'bestaudio/best',
+                                'quiet': True,
+                                'no_warnings': True,
+                                'noplaylist': True,
+                                'socket_timeout': 15,
+                                'extractor_args': {'youtube': {'player_client': clients}}
+                            }, use_cookies=use_ck)
+                            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                                info = ydl.extract_info(canonical_yt_url, download=False)
+                                if info and info.get('url'):
+                                    return info
+                        except Exception as ex:
+                            print(f"Direct yt-dlp URL extract attempt ({clients}) error: {ex}", flush=True)
                 return None
 
             yt_info = await loop.run_in_executor(None, _extract_yt_stream)
