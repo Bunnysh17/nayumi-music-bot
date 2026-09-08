@@ -1,0 +1,15 @@
+.env
+.cache/
+.local/
+__pycache__/
+*.pyc
+*.pyo
+venv/
+*.db
+*.sqlite
+*.log
+*.zip
+cookies.txt
+scratch/
+lavalink/*.jar
+lavalink/plugins/*.jar

@@ -1,0 +1,86 @@
+server:
+  port: 2333
+  address: 127.0.0.1
+  http2:
+    enabled: true
+
+lavalink:
+  plugins:
+    - dependency: "dev.lavalink.youtube:youtube-plugin:1.18.2"
+      snapshot: false
+    - dependency: "com.github.topi314.lavasrc:lavasrc-plugin:4.8.3"
+      snapshot: false
+  server:
+    password: "youshallnotpass"
+    sources:
+      youtube: false # Handled by youtube-plugin
+      bandcamp: true
+      soundcloud: true
+      twitch: true
+      vimeo: true
+      http: true
+      local: false
+    filters:
+      volume: true
+      equalizer: true
+      karaoke: true
+      timescale: true
+      tremolo: true
+      vibrato: true
+      distortion: true
+      rotation: true
+      channelMix: true
+      lowPass: true
+    bufferDurationMs: 400
+    frameBufferDurationMs: 5000
+    opusEncodingQuality: 10
+    resamplingQuality: HIGH
+    trackStuckThresholdMs: 10000
+    useSeekGhosting: true
+    playerUpdateInterval: 5
+    youtubeSearchEnabled: true
+    soundcloudSearchEnabled: true
+    gc-warnings: true
+
+plugins:
+  youtube:
+    enabled: true
+    allowSearch: true
+    allowDirectVideoIds: true
+    allowDirectPlaylistIds: true
+    clients:
+      - "MUSIC"
+      - "ANDROID"
+      - "TVHTML5EMBEDDED"
+      - "WEB"
+  lavasrc:
+    providers:
+      - "ytsearch:\"%ISRC%\""
+      - "ytsearch:%QUERY%"
+    sources:
+      spotify: true
+      applemusic: false
+      deezer: false
+      yandexmusic: false
+      flowerytts: false
+      youtube: false
+    spotify:
+      clientId: "b9e4af32ac8549d6952abfce01797099"
+      clientSecret: "f84239c387d848dc845bf81205a6a25a"
+      countryCode: "IN"
+      playlistLoadLimit: 10
+      albumLoadLimit: 10
+      resolveArtistsInSearch: true
+
+metrics:
+  prometheus:
+    enabled: false
+
+logging:
+  file:
+    path: ./logs/lavalink.log
+    max-history: 30
+    max-size: 1GB
+  level:
+    root: INFO
+    lavalink: INFO
