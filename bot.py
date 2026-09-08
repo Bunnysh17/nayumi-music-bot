@@ -7240,10 +7240,21 @@ def run_health_server():
     except Exception as e:
         print(f"[Render Health Server Error] {e}", flush=True)
 
+def run_keepalive_pinger():
+    import urllib.request
+    while True:
+        time.sleep(180)
+        for url in ["http://127.0.0.1:10000/", "https://nayumi-music-bot.onrender.com/"]:
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": "NayumiKeepAlive/1.0"})
+                urllib.request.urlopen(req, timeout=10)
+            except Exception:
+                pass
 
 if __name__ == "__main__":
     ensure_single_instance()
     threading.Thread(target=run_health_server, daemon=True).start()
+    threading.Thread(target=run_keepalive_pinger, daemon=True).start()
     bot.run(DISCORD_TOKEN)
 
 
