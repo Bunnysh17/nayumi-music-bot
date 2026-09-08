@@ -35,6 +35,16 @@ import urllib.request
 import urllib.parse
 import html
 import discord
+import discord.opus
+if not discord.opus.is_loaded():
+    for candidate in ["libopus.so.0", "libopus.so", "/usr/lib/x86_64-linux-gnu/libopus.so.0", "/usr/lib/x86_64-linux-gnu/libopus.so", "/usr/local/lib/libopus.so", "libopus-0.dll", "opus.dll", "opus"]:
+        try:
+            discord.opus.load_opus(candidate)
+            if discord.opus.is_loaded():
+                print(f"[OPUS ENGINE] ✅ Loaded Opus codec from '{candidate}'", flush=True)
+                break
+        except Exception:
+            pass
 from discord.ext import commands
 import discord.ext.voice_recv as voice_recv
 import speech_recognition as sr
@@ -1493,7 +1503,9 @@ class GuildPlayer:
             raw_source = discord.FFmpegPCMAudio(stream_target, executable=FFMPEG_EXECUTABLE, before_options=before_opts, options=opts)
             vol_source = discord.PCMVolumeTransformer(raw_source, volume=self.volume / 100.0)
         except Exception as e:
-            print(f"Error creating audio source: {e}")
+            import traceback
+            print(f"Error creating audio source: {e}", flush=True)
+            traceback.print_exc()
             self.bot.loop.create_task(self.play_next())
             return
 
@@ -1501,7 +1513,7 @@ class GuildPlayer:
             if current_play_id != self.play_id:
                 return
             if err:
-                print(f"Playback error: {err}")
+                print(f"Playback error: {err}", flush=True)
             self.bot.loop.create_task(self.on_track_end())
 
         if hasattr(self.voice_client, "is_playing") and (self.voice_client.is_playing() or self.voice_client.is_paused()):
@@ -1510,7 +1522,9 @@ class GuildPlayer:
         try:
             self.voice_client.play(vol_source, after=after_callback)
         except Exception as play_ex:
-            print(f"[play_track play error]: {play_ex}")
+            import traceback
+            print(f"[play_track play error]: {play_ex}", flush=True)
+            traceback.print_exc()
             self.bot.loop.create_task(self.play_next())
             return
 

@@ -47,6 +47,16 @@ if hasattr(sys.stdout, "reconfigure"):
 
 import aiohttp
 import discord
+import discord.opus
+if not discord.opus.is_loaded():
+    for candidate in ["libopus.so.0", "libopus.so", "/usr/lib/x86_64-linux-gnu/libopus.so.0", "/usr/lib/x86_64-linux-gnu/libopus.so", "/usr/local/lib/libopus.so", "libopus-0.dll", "opus.dll", "opus"]:
+        try:
+            discord.opus.load_opus(candidate)
+            if discord.opus.is_loaded():
+                print(f"[OPUS ENGINE] ✅ Loaded Opus codec from '{candidate}'", flush=True)
+                break
+        except Exception:
+            pass
 import discord.gateway
 from discord.ext import commands
 from discord import app_commands
