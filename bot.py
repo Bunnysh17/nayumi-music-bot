@@ -45,6 +45,33 @@ if hasattr(sys.stdout, "reconfigure"):
     except Exception:
         pass
 
+import collections
+_LOG_BUFFER = collections.deque(maxlen=800)
+class LogTee:
+    def __init__(self, original_stream):
+        self.original_stream = original_stream
+
+    def write(self, s):
+        try:
+            self.original_stream.write(s)
+            self.original_stream.flush()
+        except Exception:
+            pass
+        if s:
+            _LOG_BUFFER.append(s)
+
+    def flush(self):
+        try:
+            self.original_stream.flush()
+        except Exception:
+            pass
+
+    def __getattr__(self, name):
+        return getattr(self.original_stream, name)
+
+sys.stdout = LogTee(sys.stdout)
+sys.stderr = LogTee(sys.stderr)
+
 import aiohttp
 import discord
 import discord.opus
@@ -7161,6 +7188,37 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 
 class RenderHealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
+        if self.path == "/logs":
+            self.send_response(200)
+            self.send_header("Content-type", "text/plain; charset=utf-8")
+            self.end_headers()
+            log_text = "".join(_LOG_BUFFER)
+            self.wfile.write(log_text.encode("utf-8", errors="replace"))
+            return
+
+        if self.path == "/status":
+            self.send_response(200)
+            self.send_header("Content-type", "application/json; charset=utf-8")
+            self.end_headers()
+            status_data = {
+                "bot_user": str(bot.user) if bot.user else None,
+                "guilds_count": len(bot.guilds) if bot.is_ready() else 0,
+                "opus_loaded": discord.opus.is_loaded(),
+                "voice_clients": [
+                    {
+                        "guild_id": vc.guild.id,
+                        "guild_name": vc.guild.name,
+                        "channel": vc.channel.name if vc.channel else None,
+                        "is_connected": vc.is_connected(),
+                        "is_playing": vc.is_playing(),
+                        "is_paused": vc.is_paused()
+                    }
+                    for vc in bot.voice_clients
+                ]
+            }
+            self.wfile.write(json.dumps(status_data, indent=2).encode("utf-8"))
+            return
+
         self.send_response(200)
         self.send_header("Content-type", "text/plain; charset=utf-8")
         self.end_headers()
