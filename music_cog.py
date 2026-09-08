@@ -1425,6 +1425,7 @@ class GuildPlayer:
                             'noplaylist': True,
                             'quiet': True,
                             'socket_timeout': 10,
+                            'extractor_args': {'youtube': {'player_client': ['android', 'ios', 'web', 'mweb']}}
                         }, use_cookies=use_ck)
                         with yt_dlp.YoutubeDL(ydl_cfg) as ydl:
                             info = ydl.extract_info(target_query, download=False)
@@ -1485,7 +1486,7 @@ class GuildPlayer:
             track.direct_url = stream_target
             track.direct_url_time = time.time()
 
-        before_opts = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -probesize 32M -analyzeduration 0 -nostdin"
+        before_opts = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -nostdin"
         if seek_ms > 0:
             before_opts = f"-ss {seek_ms / 1000.0} " + before_opts
 
@@ -1493,8 +1494,7 @@ class GuildPlayer:
 
         try:
             raw_source = discord.FFmpegPCMAudio(stream_target, executable=FFMPEG_EXECUTABLE, before_options=before_opts, options=opts)
-            buffered_source = BufferedAudioSource(raw_source, buffer_seconds=15.0, prefill_frames=50)
-            vol_source = discord.PCMVolumeTransformer(buffered_source, volume=self.volume / 100.0)
+            vol_source = discord.PCMVolumeTransformer(raw_source, volume=self.volume / 100.0)
         except Exception as e:
             print(f"Error creating audio source: {e}")
             self.bot.loop.create_task(self.play_next())
@@ -3833,14 +3833,27 @@ class MusicCog(commands.Cog, name="Music"):
                     return None
 
                 # Find best matching candidate
-                chosen = None
-                for r in results:
-                    t = html.unescape(r.get('song', ''))
-                    a = html.unescape(r.get('primary_artists', '') or r.get('singers', '') or '')
-                    if not is_unwanted_remake(t, clean_q, a):
-                        chosen = r
-                        break
-                if not chosen:
+                def score_candidate(r):
+                    t = html.unescape(r.get('song', '')).lower()
+                    a = html.unescape(r.get('primary_artists', '') or r.get('singers', '') or '').lower()
+                    if is_unwanted_remake(t, clean_q, a):
+                        return -100
+                    q_words = [w for w in clean_q.lower().split() if len(w) > 1]
+                    if not q_words:
+                        return 0
+                    score = 0
+                    for w in q_words:
+                        if w in t:
+                            score += 3
+                        if w in a:
+                            score += 2
+                    return score
+
+                scored = [(score_candidate(r), r) for r in results]
+                scored.sort(key=lambda x: x[0], reverse=True)
+                if scored and scored[0][0] > -50:
+                    chosen = scored[0][1]
+                else:
                     chosen = results[0]
 
                 title = html.unescape(chosen.get('song', ''))
@@ -3941,7 +3954,49 @@ class MusicCog(commands.Cog, name="Music"):
             yt_vid_id = yt_id_match.group(1)
             canonical_yt_url = f"https://www.youtube.com/watch?v={yt_vid_id}"
 
-            # 1. Fetch metadata via official oEmbed API (Fastest & never blocked on cloud hosting)
+            # 1. Primary: Extract exact direct stream via yt-dlp (multi-client for cloud hosting & new releases)
+            def _extract_yt_stream():
+                for use_ck in [True, False]:
+                    try:
+                        ydl_opts = get_ytdl_opts({
+                            'format': 'bestaudio/251/bestaudio[ext=webm]/bestaudio[ext=m4a]/140/18/best',
+                            'quiet': True,
+                            'no_warnings': True,
+                            'noplaylist': True,
+                            'socket_timeout': 10,
+                            'extractor_args': {'youtube': {'player_client': ['android', 'ios', 'web', 'mweb']}}
+                        }, use_cookies=use_ck)
+                        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                            info = ydl.extract_info(canonical_yt_url, download=False)
+                            if info:
+                                return info
+                    except Exception as ex:
+                        print(f"Direct yt-dlp URL extract attempt error: {ex}", flush=True)
+                return None
+
+            yt_info = await loop.run_in_executor(None, _extract_yt_stream)
+            if yt_info:
+                yt_title = yt_info.get('title') or 'YouTube Video'
+                yt_author = yt_info.get('uploader') or yt_info.get('channel') or 'YouTube'
+                yt_duration = int(yt_info.get('duration') or 0)
+                yt_stream = yt_info.get('url') or canonical_yt_url
+                yt_thumb = yt_info.get('thumbnail') or f"https://i.ytimg.com/vi/{yt_vid_id}/hqdefault.jpg"
+
+                tr = Track(
+                    title=yt_title,
+                    uri=canonical_yt_url,
+                    author=yt_author,
+                    duration_sec=yt_duration,
+                    stream_url=yt_stream,
+                    requester=requester,
+                    thumbnail=yt_thumb
+                )
+                if yt_stream and yt_stream.startswith('http') and ('googlevideo.com' in yt_stream or 'manifest' in yt_stream):
+                    tr.direct_url = yt_stream
+                    tr.direct_url_time = time.time()
+                return tr
+
+            # 2. Fast Fallback: Fetch metadata via official oEmbed API
             def _fetch_yt_oembed():
                 try:
                     oembed_url = f"https://www.youtube.com/oembed?url={urllib.parse.quote(canonical_yt_url)}&format=json"
@@ -3956,7 +4011,7 @@ class MusicCog(commands.Cog, name="Music"):
             o_author = oembed_meta.get('author_name', 'YouTube') if oembed_meta else 'YouTube'
             o_thumb = oembed_meta.get('thumbnail_url', f"https://i.ytimg.com/vi/{yt_vid_id}/hqdefault.jpg") if oembed_meta else f"https://i.ytimg.com/vi/{yt_vid_id}/hqdefault.jpg"
 
-            # 2. If oEmbed didn't get title, try direct HTML scraper
+            # 3. HTML scraper if oEmbed didn't resolve title
             if not o_title:
                 def _scrape_yt_html():
                     try:
@@ -3975,68 +4030,15 @@ class MusicCog(commands.Cog, name="Music"):
                     return None
                 o_title = await loop.run_in_executor(None, _scrape_yt_html)
 
-            # 3. Try resolving via JioSaavn CD Lossless 320kbps first (Instant 320k stream)
-            if o_title:
-                saavn_track = await self.resolve_saavn_track(f"{o_title} {o_author}", requester)
-                if not saavn_track:
-                    saavn_track = await self.resolve_saavn_track(o_title, requester)
-                if saavn_track and saavn_track.direct_url:
-                    saavn_track.uri = canonical_yt_url
-                    if o_thumb:
-                        saavn_track.thumbnail = o_thumb
-                    return saavn_track
-
-            # 4. Extract direct stream via yt-dlp (multi-client for cloud hosting & 1-minute-old songs)
-            def _extract_yt_stream():
-                try:
-                    ydl_opts = get_ytdl_opts({
-                        'format': 'bestaudio/251/bestaudio[ext=webm]/bestaudio[ext=m4a]/140/18/best',
-                        'quiet': True,
-                        'no_warnings': True,
-                        'noplaylist': True,
-                        'socket_timeout': 8,
-                        'extractor_args': {'youtube': {'player_client': ['android', 'ios', 'web', 'mweb']}}
-                    }, use_cookies=False)
-                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                        info = ydl.extract_info(canonical_yt_url, download=False)
-                        if info:
-                            return info
-                except Exception as ex:
-                    print(f"Direct yt-dlp URL extract error: {ex}", flush=True)
-                return None
-
-            yt_info = await loop.run_in_executor(None, _extract_yt_stream)
-            if yt_info:
-                yt_title = yt_info.get('title') or o_title or 'YouTube Video'
-                yt_author = yt_info.get('uploader') or yt_info.get('channel') or o_author
-                yt_duration = int(yt_info.get('duration') or 0)
-                yt_stream = yt_info.get('url') or canonical_yt_url
-                yt_thumb = yt_info.get('thumbnail') or o_thumb
-
-                tr = Track(
-                    title=yt_title,
-                    uri=canonical_yt_url,
-                    author=yt_author,
-                    duration_sec=yt_duration,
-                    stream_url=yt_stream,
-                    requester=requester,
-                    thumbnail=yt_thumb
-                )
-                if yt_stream and yt_stream.startswith('http') and 'googlevideo.com' in yt_stream:
-                    tr.direct_url = yt_stream
-                    tr.direct_url_time = time.time()
-                return tr
-
-            if o_title:
-                return Track(
-                    title=o_title,
-                    uri=canonical_yt_url,
-                    author=o_author,
-                    duration_sec=210,
-                    stream_url=canonical_yt_url,
-                    requester=requester,
-                    thumbnail=o_thumb
-                )
+            return Track(
+                title=o_title or f"YouTube Video ({yt_vid_id})",
+                uri=canonical_yt_url,
+                author=o_author,
+                duration_sec=210,
+                stream_url=canonical_yt_url,
+                requester=requester,
+                thumbnail=o_thumb
+            )
 
         # Fast Track Resolver (JioSaavn 320kbps First -> yt-dlp Flat Search Fallback)
         if not is_url:
