@@ -1434,10 +1434,16 @@ class GuildPlayer:
         try:
             raw_source = discord.FFmpegPCMAudio(stream_target, executable=FFMPEG_EXECUTABLE, before_options=before_opts, options=opts)
             vol_source = discord.PCMVolumeTransformer(raw_source, volume=self.volume / 100.0)
+            buffered_source = BufferedAudioSource(vol_source, buffer_seconds=10.0)
         except Exception as e:
             import traceback
             print(f"Error creating audio source: {e}", flush=True)
             traceback.print_exc()
+            if self.home_channel:
+                self.bot.loop.create_task(self.home_channel.send(embed=discord.Embed(
+                    description=f"{E_ALERT} **Audio Setup Error:** `{e}`",
+                    color=ANKUSH_COLOR
+                )))
             self.bot.loop.create_task(self.play_next())
             return
 
@@ -1452,11 +1458,16 @@ class GuildPlayer:
             self.voice_client.stop()
 
         try:
-            self.voice_client.play(vol_source, after=after_callback)
+            self.voice_client.play(buffered_source, after=after_callback)
         except Exception as play_ex:
             import traceback
             print(f"[play_track play error]: {play_ex}", flush=True)
             traceback.print_exc()
+            if self.home_channel:
+                self.bot.loop.create_task(self.home_channel.send(embed=discord.Embed(
+                    description=f"{E_ALERT} **Voice Client Play Error:** `{play_ex}`",
+                    color=ANKUSH_COLOR
+                )))
             self.bot.loop.create_task(self.play_next())
             return
 
