@@ -4569,8 +4569,10 @@ class MusicCog(commands.Cog, name="Music"):
                     pass
                 await asyncio.sleep(0.5)
             try:
-                player.voice_client = await voice_channel.connect(cls=voice_recv.VoiceRecvClient, timeout=15.0, reconnect=True)
-                self.start_voice_listening(ctx.guild, player.voice_client)
+                try:
+                    player.voice_client = await voice_channel.connect(timeout=15.0, reconnect=True)
+                except Exception:
+                    player.voice_client = await voice_channel.connect(cls=voice_recv.VoiceRecvClient, timeout=15.0, reconnect=True)
             except Exception as e:
                 embed = discord.Embed(description=f"{E_ALERT} Failed to join voice channel: `{e}`", color=ANKUSH_COLOR)
                 await ctx.send(embed=embed)

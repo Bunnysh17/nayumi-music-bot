@@ -6421,32 +6421,34 @@ async def on_message(message):
 
     admin_display_name = get_user_display_greeting_name(message.author)
 
-    # Check if message is a command (even without prefix like 'tr eg', 'translate', 'imagine', etc.)
+    # Check if message is a command (even without prefix like 'p ...', 'play ...', 'skip', 'tr eg', etc.)
     is_tr_cmd = low_content.startswith("tr ") or low_content == "tr" or low_content.startswith("translate ") or low_content == "translate"
     is_imagine_cmd = low_content.startswith("imagine ") or low_content.startswith("draw ") or low_content.startswith("genimage ")
-    is_other_cmd = any(low_content.startswith(c) for c in ["ai ", "help", "ping", "services", "access", "owner", "aiclear", "aideactivate", "aistatus", "aiactivate", "aiwhitelist", "aiwl", "dmaccess", "dmacess", "dmacc", "dmallow", "dmchat"])
+    is_music_cmd = any(low_content.startswith(c) for c in [
+        "p ", "play ", "skip", "pause", "resume", "stop", "queue", "np", "nowplaying",
+        "vol ", "volume ", "loop", "previous", "prev", "back", "skipto ", "join", "leave", "dc", "disconnect", "clear", "247"
+    ])
+    is_other_cmd = any(low_content.startswith(c) for c in [
+        "ai ", "help", "ping", "services", "access", "owner", "aiclear", "aideactivate", "aistatus",
+        "aiactivate", "aiwhitelist", "aiwl", "dmaccess", "dmacess", "dmacc", "dmallow", "dmchat"
+    ])
 
-    # For no-prefix users, ONLY treat as a command if the first word is actually a registered command in the bot
-    is_registered_bot_cmd = bot.get_command(first_word) is not None
-    is_noprefix_valid_cmd = is_noprefix_user(message.author.id) and is_registered_bot_cmd
-
-    is_cmd = message.content.startswith(prefix) or is_tr_cmd or is_imagine_cmd or is_other_cmd or is_noprefix_valid_cmd
+    # Check if the first word is a registered bot command
+    is_registered_bot_cmd = (bot.get_command(first_word) is not None)
+    is_any_cmd = message.content.startswith(prefix) or is_tr_cmd or is_imagine_cmd or is_music_cmd or is_other_cmd or is_registered_bot_cmd
 
     # Channel Access & Trigger Rules:
-    # 1. In #ai-chat OR in DMs (for authorized users): Chat is continuously active for every normal message.
-    # 2. In ANY other public/server channel (#public-chat, #general, etc.):
-    #    Nayumi responds to Owners/Admins and AI Whitelisted Users if called by name ("nayumi ...")
     if is_ai_channel or is_in_dm:
-        should_process_as_ai = not is_cmd
+        should_process_as_ai = not is_any_cmd
     else:
         if is_admin_or_owner_speaking or is_whitelisted_ai_user:
-            should_process_as_ai = (is_called_by_name or is_shutdown_trigger(low_content) or is_wakeup_trigger(low_content)) and not is_cmd
+            should_process_as_ai = (is_called_by_name or is_shutdown_trigger(low_content) or is_wakeup_trigger(low_content)) and not is_any_cmd
         else:
             should_process_as_ai = False
 
     if not should_process_as_ai:
-        if not message.content.startswith(prefix) and not is_noprefix_user(message.author.id):
-            if is_tr_cmd or is_imagine_cmd or is_other_cmd:
+        if not message.content.startswith(prefix):
+            if is_tr_cmd or is_imagine_cmd or is_music_cmd or is_other_cmd or is_registered_bot_cmd:
                 message.content = prefix + message.content
         await bot.process_commands(message)
         return
