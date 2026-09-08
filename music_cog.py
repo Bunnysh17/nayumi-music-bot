@@ -265,22 +265,21 @@ def get_ytdl_cookie_file() -> Optional[str]:
             return path
     return None
 
-def get_ytdl_opts(custom: Optional[Dict[str, Any]] = None, use_cookies: bool = True) -> Dict[str, Any]:
+def get_ytdl_opts(custom: Optional[Dict[str, Any]] = None, use_cookies: bool = False) -> Dict[str, Any]:
     opts: Dict[str, Any] = {
-        'format': 'bestaudio/251/bestaudio[ext=webm]/bestaudio[ext=m4a]/140/18/best',
-        'format_sort': ['abr:desc', 'asr:desc', 'quality:desc'],
+        'format': 'bestaudio/251/140/best',
         'noplaylist': True,
         'quiet': True,
         'no_warnings': True,
-        'socket_timeout': 15,
+        'socket_timeout': 10,
         'source_address': '0.0.0.0',
         'extractor_args': {
             'youtube': {
-                'player_client': ['android', 'ios', 'web', 'mweb']
+                'player_client': ['android', 'ios']
             }
         },
         'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            'User-Agent': 'Mozilla/5.0 (Linux; Android 13; SM-G981B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36',
             'Accept-Language': 'en-US,en;q=0.9',
         }
     }
@@ -1418,14 +1417,14 @@ class GuildPlayer:
                 else:
                     target_query = f"ytsearch1:{track.title} {track.author or ''}"
 
-                for use_ck in [True, False]:
+                for use_ck in [False, True]:
                     try:
                         ydl_cfg = get_ytdl_opts({
-                            'format': 'bestaudio/251/bestaudio[ext=webm]/bestaudio[ext=m4a]/140/18/best',
+                            'format': 'bestaudio/251/140/best',
                             'noplaylist': True,
                             'quiet': True,
                             'socket_timeout': 10,
-                            'extractor_args': {'youtube': {'player_client': ['android', 'ios', 'web', 'mweb']}}
+                            'extractor_args': {'youtube': {'player_client': ['android', 'ios']}}
                         }, use_cookies=use_ck)
                         with yt_dlp.YoutubeDL(ydl_cfg) as ydl:
                             info = ydl.extract_info(target_query, download=False)
@@ -3965,15 +3964,15 @@ class MusicCog(commands.Cog, name="Music"):
 
             # 1. Primary: Extract exact direct stream via yt-dlp (multi-client for cloud hosting & new releases)
             def _extract_yt_stream():
-                for use_ck in [True, False]:
+                for use_ck in [False, True]:
                     try:
                         ydl_opts = get_ytdl_opts({
-                            'format': 'bestaudio/251/bestaudio[ext=webm]/bestaudio[ext=m4a]/140/18/best',
+                            'format': 'bestaudio/251/140/best',
                             'quiet': True,
                             'no_warnings': True,
                             'noplaylist': True,
                             'socket_timeout': 10,
-                            'extractor_args': {'youtube': {'player_client': ['android', 'ios', 'web', 'mweb']}}
+                            'extractor_args': {'youtube': {'player_client': ['android', 'ios']}}
                         }, use_cookies=use_ck)
                         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                             info = ydl.extract_info(canonical_yt_url, download=False)
@@ -4079,16 +4078,16 @@ class MusicCog(commands.Cog, name="Music"):
                         pass
                 return None
 
-            # Fast flat search fallback on YouTube with multi-client
+            # Fast search on YouTube with multi-client
             for use_ck in [False, True]:
                 try:
                     search_opts = get_ytdl_opts({
-                        'format': 'bestaudio/251/bestaudio[ext=webm]/bestaudio[ext=m4a]/140/18/best',
+                        'format': 'bestaudio/251/140/best',
                         'quiet': True,
-                        'extract_flat': True,
+                        'extract_flat': False,
                         'noplaylist': True,
                         'socket_timeout': 10,
-                        'extractor_args': {'youtube': {'player_client': ['android', 'ios', 'web', 'mweb']}}
+                        'extractor_args': {'youtube': {'player_client': ['android', 'ios']}}
                     }, use_cookies=use_ck)
                     with yt_dlp.YoutubeDL(search_opts) as ydl:
                         info = ydl.extract_info(f"ytsearch1:{search_target}", download=False)
