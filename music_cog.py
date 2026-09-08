@@ -1389,7 +1389,7 @@ class GuildPlayer:
         stream_target = None
         if track.direct_url and (time.time() - track.direct_url_time < 3600):
             stream_target = track.direct_url
-        elif track.stream_url and track.stream_url.startswith("http") and ("saavncdn.com" in track.stream_url or "googlevideo.com" in track.stream_url):
+        elif track.stream_url and track.stream_url.startswith("http") and "googlevideo.com" in track.stream_url:
             stream_target = track.stream_url
             track.direct_url = stream_target
             track.direct_url_time = time.time()
@@ -1804,7 +1804,6 @@ class PlatformSearchSelect(discord.ui.Select):
             discord.SelectOption(label="Spotify", description="Stream from Spotify", emoji=discord.PartialEmoji.from_str(E_SPOTIFY), value="spotify"),
             discord.SelectOption(label="SoundCloud", description="Stream from SoundCloud", emoji=discord.PartialEmoji.from_str(E_HEADPHONES), value="sc"),
             discord.SelectOption(label="Apple Music", description="Stream from Apple Music", emoji=discord.PartialEmoji.from_str(E_MUSIC), value="apple"),
-            discord.SelectOption(label="JioSaavn", description="Stream from JioSaavn", emoji=discord.PartialEmoji.from_str(E_MIC), value="jiosaavn"),
             discord.SelectOption(label="Deezer", description="Stream from Deezer", emoji=discord.PartialEmoji.from_str(E_MUSIC), value="deezer"),
         ]
         super().__init__(placeholder="Select a platform to search...", min_values=1, max_values=1, options=options)
@@ -1823,7 +1822,6 @@ class PlatformSearchSelect(discord.ui.Select):
             "spotify": "Spotify",
             "sc": "SoundCloud",
             "apple": "Apple Music",
-            "jiosaavn": "JioSaavn",
             "deezer": "Deezer"
         }
         platform_name = platform_names.get(platform_val, "Platform")
@@ -3437,9 +3435,7 @@ class MusicCog(commands.Cog, name="Music"):
             embed = discord.Embed(description="No music is currently playing in this server.", color=ANKUSH_COLOR)
             return await channel.send(embed=embed)
 
-        embed = self.make_nowplaying_embed(player)
         view = MusicControlView(self, channel.guild.id)
-        file = None
         try:
             loop = asyncio.get_event_loop()
             curr_pos = int(time.time() - player.start_time) * 1000 if player.start_time else 0
@@ -3459,15 +3455,15 @@ class MusicCog(commands.Cog, name="Music"):
             if buf:
                 buf.seek(0)
                 file = discord.File(buf, filename="card.png")
-                embed.set_image(url="attachment://card.png")
+                msg = await channel.send(file=file, view=view)
+                player.last_np_msg = msg
+                return msg
         except Exception as card_err:
             print(f"[send_nowplaying_card] Image card error: {card_err}", flush=True)
 
-        if file:
-            msg = await channel.send(file=file, view=view)
-        else:
-            embed = self.make_nowplaying_embed(player)
-            msg = await channel.send(embed=embed, view=view)
+        # Fallback: send text embed only if card generation fails
+        embed = self.make_nowplaying_embed(player)
+        msg = await channel.send(embed=embed, view=view)
         player.last_np_msg = msg
         return msg
 
@@ -3480,9 +3476,31 @@ class MusicCog(commands.Cog, name="Music"):
             return
         try:
             msg = await channel.fetch_message(message_id)
-            embed = self.make_nowplaying_embed(player)
             view = MusicControlView(self, channel.guild.id)
-            await msg.edit(embed=embed, view=view)
+            # Regenerate the PNG card image for the update
+            loop = asyncio.get_event_loop()
+            curr_pos = int(time.time() - player.start_time) * 1000 if player.start_time else 0
+            buf = await loop.run_in_executor(
+                None,
+                create_music_card,
+                track.title,
+                track.author or "",
+                curr_pos,
+                track.length,
+                track.thumbnail,
+                track.requester.display_name if track.requester else "User",
+                player.loop_mode,
+                player.volume,
+                player.is_paused
+            )
+            if buf:
+                buf.seek(0)
+                file = discord.File(buf, filename="card.png")
+                await msg.edit(attachments=[file], view=view)
+            else:
+                # Fallback to embed if card fails
+                embed = self.make_nowplaying_embed(player)
+                await msg.edit(embed=embed, view=view)
         except Exception as e:
             print(f"[update_nowplaying_card] error: {e}", flush=True)
 
@@ -3910,9 +3928,6 @@ class MusicCog(commands.Cog, name="Music"):
                 resolved_song = await self.resolve_lyrics_to_song(search_target)
                 if resolved_song and resolved_song.lower() != search_target.lower():
                     print(f"[SEARCH TRACK] Lyrics resolved: '{search_target}' -> '{resolved_song}'", flush=True)
-                    saavn_track = await self.resolve_saavn_track(resolved_song, requester)
-                    if saavn_track:
-                        return saavn_track
                     search_target = resolved_song
             except Exception as e:
                 print(f"[Lyrics Resolver Error] {e}", flush=True)
@@ -4152,148 +4167,9 @@ class MusicCog(commands.Cog, name="Music"):
 
         related_artists, search_tag = get_vibe_suggestions(clean_title, artist)
 
-        # 1. Primary Engine: Instant Studio-Quality JioSaavn AI Seed Recommendation & Vibe Radio
-        def _saavn_autoplay():
-            try:
-                # Step A: Query direct song seed recommendations via JioSaavn reco.getreco
-                seed_q = f"{clean_title} {artist}".strip()
-                try:
-                    s_search_url = 'https://www.jiosaavn.com/api.php?__call=search.getResults&_format=json&n=3&p=1&_marker=0&ctx=android&q=' + urllib.parse.quote(seed_q)
-                    s_req = urllib.request.Request(s_search_url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'})
-                    s_resp = urllib.request.urlopen(s_req, timeout=4)
-                    s_data = json.loads(s_resp.read().decode('utf-8', errors='ignore'))
-                    s_results = s_data.get('results', [])
-                    if s_results:
-                        seed_song_id = s_results[0].get('id')
-                        if seed_song_id:
-                            reco_url = f'https://www.jiosaavn.com/api.php?__call=reco.getreco&_format=json&pid={seed_song_id}'
-                            reco_req = urllib.request.Request(reco_url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'})
-                            reco_resp = urllib.request.urlopen(reco_req, timeout=4)
-                            reco_data = json.loads(reco_resp.read().decode('utf-8', errors='ignore'))
-                            reco_list = reco_data.get(seed_song_id, []) if isinstance(reco_data, dict) else (reco_data if isinstance(reco_data, list) else [])
-                            
-                            valid_recos = []
-                            for r in reco_list:
-                                t = html.unescape(r.get('song', ''))
-                                a = html.unescape(r.get('primary_artists', '') or r.get('singers', '') or '')
-                                dur = int(r.get('duration', 0))
-                                p_url = r.get('perma_url', '') or ('https://www.jiosaavn.com/song/' + str(r.get('id', '')))
-                                norm_t = re.sub(r'[^a-zA-Z0-9]', '', t.lower())
-                                
-                                if is_unwanted_remake(t, "", a):
-                                    continue
-                                if dur < 60 or dur > 500:
-                                    continue
-                                if p_url in excluded_uris or norm_t in excluded_titles:
-                                    continue
-                                if not r.get('encrypted_media_url'):
-                                    continue
-                                valid_recos.append(r)
-                                
-                            if valid_recos:
-                                chosen_r = valid_recos[0] if len(valid_recos) <= 2 else random.choice(valid_recos[:min(6, len(valid_recos))])
-                                title = html.unescape(chosen_r.get('song', ''))
-                                art = html.unescape(chosen_r.get('primary_artists', '') or chosen_r.get('singers', '') or chosen_r.get('music', '') or 'Unknown Artist')
-                                duration = int(chosen_r.get('duration', 0))
-                                img = chosen_r.get('image', '').replace('150x150', '500x500')
-                                enc_url = chosen_r.get('encrypted_media_url', '')
-                                perma_url = chosen_r.get('perma_url', '') or ('https://www.jiosaavn.com/song/' + str(chosen_r.get('id', '')))
 
-                                dec_url = decrypt_saavn_media_url(enc_url)
-                                if dec_url and dec_url.startswith('http'):
-                                    tr = Track(
-                                        title=title,
-                                        uri=perma_url,
-                                        author=art,
-                                        duration_sec=duration,
-                                        stream_url=dec_url,
-                                        requester=requester,
-                                        thumbnail=img
-                                    )
-                                    tr.direct_url = dec_url
-                                    tr.direct_url_time = time.time()
-                                    return tr
-                except Exception as reco_ex:
-                    print(f"JioSaavn direct reco error: {reco_ex}")
+        # 1. Primary Engine: YouTube Related Tracks
 
-                # Step B: Fallback to Artist Top Hits & Related Vibe Clusters
-                search_targets = []
-                if artist and artist != "Trending Hits":
-                    search_targets.append(f"{artist} top songs")
-                    search_targets.append(f"{artist} hit songs")
-                if related_artists:
-                    for rel_a in random.sample(related_artists, min(3, len(related_artists))):
-                        search_targets.append(f"{rel_a} top songs")
-                if search_tag:
-                    search_targets.append(search_tag)
-                if clean_title:
-                    search_targets.append(clean_title)
-
-                for st in search_targets:
-                    try:
-                        url = 'https://www.jiosaavn.com/api.php?__call=search.getResults&_format=json&n=15&p=1&_marker=0&ctx=android&q=' + urllib.parse.quote(st.strip())
-                        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'})
-                        resp = urllib.request.urlopen(req, timeout=4)
-                        raw = resp.read().decode('utf-8', errors='ignore')
-                        data = json.loads(raw)
-                        results = data.get('results', [])
-                        valid = []
-                        for r in results:
-                            t = html.unescape(r.get('song', ''))
-                            a = html.unescape(r.get('primary_artists', '') or r.get('singers', '') or '')
-                            dur = int(r.get('duration', 0))
-                            p_url = r.get('perma_url', '') or ('https://www.jiosaavn.com/song/' + str(r.get('id', '')))
-                            norm_t = re.sub(r'[^a-zA-Z0-9]', '', t.lower())
-                            
-                            if is_unwanted_remake(t, "", a):
-                                continue
-                            if dur < 75 or dur > 480:
-                                continue
-                            if p_url in excluded_uris or norm_t in excluded_titles:
-                                continue
-                            if not r.get('encrypted_media_url'):
-                                continue
-                            valid.append(r)
-                            
-                        if valid:
-                            chosen_r = valid[0] if len(valid) == 1 else random.choice(valid[:min(5, len(valid))])
-                            title = html.unescape(chosen_r.get('song', ''))
-                            art = html.unescape(chosen_r.get('primary_artists', '') or chosen_r.get('singers', '') or chosen_r.get('music', '') or 'Unknown Artist')
-                            duration = int(chosen_r.get('duration', 0))
-                            img = chosen_r.get('image', '').replace('150x150', '500x500')
-                            enc_url = chosen_r.get('encrypted_media_url', '')
-                            perma_url = chosen_r.get('perma_url', '') or ('https://www.jiosaavn.com/song/' + str(chosen_r.get('id', '')))
-
-                            dec_url = decrypt_saavn_media_url(enc_url)
-                            if dec_url and dec_url.startswith('http'):
-                                tr = Track(
-                                    title=title,
-                                    uri=perma_url,
-                                    author=art,
-                                    duration_sec=duration,
-                                    stream_url=dec_url,
-                                    requester=requester,
-                                    thumbnail=img
-                                )
-                                tr.direct_url = dec_url
-                                tr.direct_url_time = time.time()
-                                return tr
-                    except Exception:
-                        pass
-            except Exception as ex:
-                print(f"Saavn autoplay discovery error: {ex}")
-            return None
-
-        saavn_track = await loop.run_in_executor(None, _saavn_autoplay)
-        if saavn_track:
-            if player:
-                player.played_uris.add(saavn_track.uri)
-                norm_t = re.sub(r'[^a-zA-Z0-9]', '', saavn_track.title.lower())
-                if norm_t:
-                    player.played_titles.add(norm_t)
-            return saavn_track
-
-        # 2. Secondary Engine: YouTube Trending Wave
         def _extract_candidates():
             flat_opts = get_ytdl_opts({
                 'quiet': True,
@@ -4411,57 +4287,7 @@ class MusicCog(commands.Cog, name="Music"):
     async def search_multi_platform(self, query: str, platform_key: str, limit: int = 10) -> List[Track]:
         loop = asyncio.get_event_loop()
         
-        if platform_key == "jiosaavn":
-            def _saavn_search():
-                try:
-                    clean_q = query.strip()
-                    url = 'https://www.jiosaavn.com/api.php?__call=search.getResults&_format=json&n=' + str(limit * 2) + '&p=1&_marker=0&ctx=android&q=' + urllib.parse.quote(clean_q)
-                    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'})
-                    resp = urllib.request.urlopen(req, timeout=5)
-                    raw = resp.read().decode('utf-8', errors='ignore')
-                    data = json.loads(raw)
-                    results = data.get('results', [])
-                    out = []
-                    for r in results:
-                        title = html.unescape(r.get('song', ''))
-                        artist = html.unescape(r.get('primary_artists', '') or r.get('singers', '') or r.get('music', '') or 'Unknown Artist')
-                        if is_unwanted_remake(title, query, artist):
-                            continue
-                        duration = int(r.get('duration', 0))
-                        img = r.get('image', '').replace('150x150', '500x500')
-                        perma_url = r.get('perma_url', '') or ('https://www.jiosaavn.com/song/' + str(r.get('id', '')))
-                        dec_stream = decrypt_saavn_media_url(r.get('encrypted_media_url', '')) or perma_url
-                        out.append({
-                            'title': title,
-                            'url': perma_url,
-                            'author': artist,
-                            'duration': duration,
-                            'thumbnail': img,
-                            'stream_url': dec_stream
-                        })
-                        if len(out) >= limit:
-                            break
-                    return out
-                except Exception as ex:
-                    print(f"JioSaavn multi search error: {ex}")
-                    return []
-            raw_list = await loop.run_in_executor(None, _saavn_search)
-            tracks = []
-            for r in raw_list:
-                tr = Track(
-                    title=r['title'],
-                    uri=r['url'],
-                    author=r['author'],
-                    duration_sec=r['duration'],
-                    stream_url=r.get('stream_url', r['url']),
-                    requester=None,
-                    thumbnail=r['thumbnail']
-                )
-                if r.get('stream_url') and r['stream_url'].startswith('http'):
-                    tr.direct_url = r['stream_url']
-                    tr.direct_url_time = time.time()
-                tracks.append(tr)
-            return tracks
+
 
         def _extract():
             prefix = "ytsearch"
@@ -6410,7 +6236,6 @@ class MusicCog(commands.Cog, name="Music"):
                 f"> {E_SPOTIFY} **Spotify:** `!src-spotify <track/album/playlist url>`\n"
                 f"> {E_HEADPHONES} **SoundCloud:** `!src-soundcloud <query>`\n"
                 f"> {E_MUSIC} **Deezer:** `!src-deezer <query>`\n"
-                f"> {E_MIC} **JioSaavn:** `!src-jiosaavn <query>`\n"
             ),
             color=ANKUSH_COLOR
         )
@@ -6437,10 +6262,7 @@ class MusicCog(commands.Cog, name="Music"):
         """Search and play directly from Deezer."""
         await self.play_cmd(ctx, query=query)
 
-    @commands.command(name="src-jiosaavn")
-    async def src_jiosaavn_cmd(self, ctx: commands.Context, *, query: str):
-        """Search and play directly from JioSaavn."""
-        await self.play_cmd(ctx, query=query)
+
 
     @commands.command(name="spotify")
     async def spotify_cmd(self, ctx: commands.Context, *, arg: Optional[str] = None):
@@ -6868,7 +6690,6 @@ class MusicCog(commands.Cog, name="Music"):
                 value=(
                     f"• **YouTube & YT Music:** `yt-dlp Direct Low-Latency Extractor`\n"
                     f"• **Spotify Platform:** `Next.js Real-time Scraper (Tracks, Playlists, Albums)`\n"
-                    f"• **JioSaavn CDN:** `320kbps CD Quality Stream Extractor`\n"
                     f"• **SoundCloud & Direct:** `SoundCloud Wave Engine & Direct HLS / AAC / MP3 / FLAC`"
                 ),
                 inline=False
