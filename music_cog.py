@@ -4789,7 +4789,14 @@ class MusicCog(commands.Cog, name="Music"):
         embed.set_footer(text="Developed by Bunny")
         await ctx.send(embed=embed)
 
-        if player.is_playing or player.is_paused:
+        is_actually_playing = False
+        if player.voice_client:
+            if hasattr(player.voice_client, "is_playing") and player.voice_client.is_playing():
+                is_actually_playing = True
+            elif hasattr(player.voice_client, "is_paused") and player.voice_client.is_paused():
+                is_actually_playing = True
+
+        if is_actually_playing:
             player.queue.append(track)
             player.prefetched_autoplay = None
         else:
