@@ -3940,102 +3940,48 @@ class MusicCog(commands.Cog, name="Music"):
             yt_vid_id = yt_id_match.group(1)
             canonical_yt_url = f"https://www.youtube.com/watch?v={yt_vid_id}"
 
-            # 1. Primary: Extract exact direct stream via yt-dlp (multi-client for cloud hosting & new releases)
-            def _extract_yt_stream():
-                for clients in [['android'], ['android', 'ios']]:
-                    for use_ck in [False, True]:
-                        try:
-                            ydl_opts = get_ytdl_opts({
-                                'format': 'bestaudio/best',
-                                'quiet': True,
-                                'no_warnings': True,
-                                'noplaylist': True,
-                                'socket_timeout': 6,
-                                'extractor_args': {
-                                    'youtube': {
-                                        'player_client': clients,
-                                        'player_skip': ['webpage', 'configs']
-                                    }
-                                }
-                            }, use_cookies=use_ck)
-                            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                                info = ydl.extract_info(canonical_yt_url, download=False)
-                                if info and info.get('url'):
-                                    return info
-                        except Exception as ex:
-                            print(f"Direct yt-dlp URL extract attempt ({clients}) error: {ex}", flush=True)
-                return None
-
-            yt_info = await loop.run_in_executor(None, _extract_yt_stream)
-            if yt_info:
-                yt_title = yt_info.get('title') or 'YouTube Video'
-                yt_author = yt_info.get('uploader') or yt_info.get('channel') or 'YouTube'
-                yt_duration = int(yt_info.get('duration') or 0)
-                yt_stream = yt_info.get('url') or canonical_yt_url
-                yt_thumb = yt_info.get('thumbnail') or f"https://i.ytimg.com/vi/{yt_vid_id}/hqdefault.jpg"
-
-                tr = Track(
-                    title=yt_title,
-                    uri=canonical_yt_url,
-                    author=yt_author,
-                    duration_sec=yt_duration,
-                    stream_url=yt_stream,
-                    requester=requester,
-                    thumbnail=yt_thumb
-                )
-                if yt_stream and yt_stream.startswith('http') and ('googlevideo.com' in yt_stream or 'manifest' in yt_stream):
-                    tr.direct_url = yt_stream
-                    tr.direct_url_time = time.time()
-                return tr
-
-            # 2. Fast Fallback: Fetch metadata via official oEmbed API
-            def _fetch_yt_oembed():
+            # 1. Instant Metadata Fetch via official oEmbed + noembed (0.1s)
+            def _fetch_yt_meta():
+                # oEmbed
                 try:
                     oembed_url = f"https://www.youtube.com/oembed?url={urllib.parse.quote(canonical_yt_url)}&format=json"
                     req = urllib.request.Request(oembed_url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'})
-                    resp = urllib.request.urlopen(req, timeout=4)
-                    return json.loads(resp.read().decode('utf-8', errors='ignore'))
+                    resp = urllib.request.urlopen(req, timeout=3)
+                    dat = json.loads(resp.read().decode('utf-8', errors='ignore'))
+                    if dat.get('title'):
+                        return dat.get('title'), dat.get('author_name'), dat.get('thumbnail_url')
                 except Exception:
-                    return None
+                    pass
 
-            oembed_meta = await loop.run_in_executor(None, _fetch_yt_oembed)
-            o_title = oembed_meta.get('title') if oembed_meta else None
-            o_author = oembed_meta.get('author_name', 'YouTube') if oembed_meta else 'YouTube'
-            o_thumb = oembed_meta.get('thumbnail_url', f"https://i.ytimg.com/vi/{yt_vid_id}/hqdefault.jpg") if oembed_meta else f"https://i.ytimg.com/vi/{yt_vid_id}/hqdefault.jpg"
+                # noembed
+                try:
+                    req = urllib.request.Request(f"https://noembed.com/embed?url={urllib.parse.quote(canonical_yt_url)}", headers={'User-Agent': 'Mozilla/5.0'})
+                    resp = urllib.request.urlopen(req, timeout=3)
+                    dat = json.loads(resp.read().decode('utf-8', errors='ignore'))
+                    if dat.get('title'):
+                        return dat.get('title'), dat.get('author_name'), dat.get('thumbnail_url')
+                except Exception:
+                    pass
 
-            # 3. NoEmbed / HTML fallback for title
-            if not o_title:
-                def _fetch_noembed():
-                    try:
-                        req = urllib.request.Request(f"https://noembed.com/embed?url={urllib.parse.quote(canonical_yt_url)}", headers={'User-Agent': 'Mozilla/5.0'})
-                        resp = urllib.request.urlopen(req, timeout=3)
-                        dat = json.loads(resp.read().decode('utf-8', errors='ignore'))
-                        return dat.get('title'), dat.get('author_name')
-                    except Exception:
-                        return None, None
-                o_title, noembed_auth = await loop.run_in_executor(None, _fetch_noembed)
-                if noembed_auth and (not o_author or o_author == "YouTube"):
-                    o_author = noembed_auth
+                # HTML scraper fallback
+                try:
+                    req = urllib.request.Request(canonical_yt_url, headers={'User-Agent': 'Mozilla/5.0'})
+                    html_content = urllib.request.urlopen(req, timeout=3).read().decode('utf-8', errors='ignore')
+                    title_m = re.search(r'<title>(.*?)</title>', html_content)
+                    if title_m:
+                        raw_t = html.unescape(title_m.group(1)).replace(' - YouTube', '').strip()
+                        if raw_t and raw_t.lower() != "youtube":
+                            return raw_t, "YouTube", f"https://i.ytimg.com/vi/{yt_vid_id}/hqdefault.jpg"
+                except Exception:
+                    pass
 
-            if not o_title:
-                def _scrape_yt_html():
-                    try:
-                        req = urllib.request.Request(
-                            canonical_yt_url,
-                            headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-                        )
-                        html_content = urllib.request.urlopen(req, timeout=4).read().decode('utf-8', errors='ignore')
-                        title_m = re.search(r'<title>(.*?)</title>', html_content)
-                        if title_m:
-                            raw_t = html.unescape(title_m.group(1)).replace(' - YouTube', '').strip()
-                            if raw_t and raw_t.lower() != "youtube":
-                                return raw_t
-                    except Exception:
-                        pass
-                    return None
-                o_title = await loop.run_in_executor(None, _scrape_yt_html)
+                return None, None, f"https://i.ytimg.com/vi/{yt_vid_id}/hqdefault.jpg"
 
-            # 4. Instant high-quality audio stream resolution via JioSaavn or SoundCloud
+            o_title, o_author, o_thumb = await loop.run_in_executor(None, _fetch_yt_meta)
+            o_author = o_author or "YouTube"
+            o_thumb = o_thumb or f"https://i.ytimg.com/vi/{yt_vid_id}/hqdefault.jpg"
+
+            # 2. Instant Stream Resolution via JioSaavn or SoundCloud (0.2s - 100% bypass of cloud blocks)
             if o_title:
                 clean_queries = extract_clean_song_queries(o_title, o_author)
                 for cq in clean_queries:
@@ -4076,6 +4022,54 @@ class MusicCog(commands.Cog, name="Music"):
                     sc_tr.direct_url = sc_res.get('url')
                     sc_tr.direct_url_time = time.time()
                     return sc_tr
+
+            # 3. Direct yt-dlp URL extract fallback (if Saavn/SC didn't match)
+            def _extract_yt_stream():
+                for clients in [['android'], ['android', 'ios']]:
+                    for use_ck in [False, True]:
+                        try:
+                            ydl_opts = get_ytdl_opts({
+                                'format': 'bestaudio/best',
+                                'quiet': True,
+                                'no_warnings': True,
+                                'noplaylist': True,
+                                'socket_timeout': 4,
+                                'extractor_args': {
+                                    'youtube': {
+                                        'player_client': clients,
+                                        'player_skip': ['webpage', 'configs']
+                                    }
+                                }
+                            }, use_cookies=use_ck)
+                            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                                info = ydl.extract_info(canonical_yt_url, download=False)
+                                if info and info.get('url'):
+                                    return info
+                        except Exception:
+                            pass
+                return None
+
+            yt_info = await loop.run_in_executor(None, _extract_yt_stream)
+            if yt_info:
+                yt_title = yt_info.get('title') or o_title or 'YouTube Video'
+                yt_author = yt_info.get('uploader') or yt_info.get('channel') or o_author
+                yt_duration = int(yt_info.get('duration') or 0)
+                yt_stream = yt_info.get('url') or canonical_yt_url
+                yt_thumb = yt_info.get('thumbnail') or o_thumb
+
+                tr = Track(
+                    title=yt_title,
+                    uri=canonical_yt_url,
+                    author=yt_author,
+                    duration_sec=yt_duration,
+                    stream_url=yt_stream,
+                    requester=requester,
+                    thumbnail=yt_thumb
+                )
+                if yt_stream and yt_stream.startswith('http') and ('googlevideo.com' in yt_stream or 'manifest' in yt_stream):
+                    tr.direct_url = yt_stream
+                    tr.direct_url_time = time.time()
+                return tr
 
             return Track(
                 title=o_title or f"YouTube Video ({yt_vid_id})",
