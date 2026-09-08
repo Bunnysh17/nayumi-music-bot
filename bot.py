@@ -7184,7 +7184,7 @@ async def on_command_error(ctx, error):
 
 
 import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
 class RenderHealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -7234,7 +7234,7 @@ class RenderHealthHandler(BaseHTTPRequestHandler):
 def run_health_server():
     port = int(os.environ.get("PORT", 10000))
     try:
-        server = HTTPServer(("0.0.0.0", port), RenderHealthHandler)
+        server = ThreadingHTTPServer(("0.0.0.0", port), RenderHealthHandler)
         print(f"[Render Health Server] Listening on 0.0.0.0:{port} for 24/7 keepalive.", flush=True)
         server.serve_forever()
     except Exception as e:
@@ -7243,13 +7243,16 @@ def run_health_server():
 def run_keepalive_pinger():
     import urllib.request
     while True:
-        time.sleep(180)
-        for url in ["http://127.0.0.1:10000/", "https://nayumi-music-bot.onrender.com/"]:
-            try:
-                req = urllib.request.Request(url, headers={"User-Agent": "NayumiKeepAlive/1.0"})
-                urllib.request.urlopen(req, timeout=10)
-            except Exception:
-                pass
+        try:
+            time.sleep(60)
+            for url in ["http://127.0.0.1:10000/", "https://nayumi-music-bot.onrender.com/"]:
+                try:
+                    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 NayumiKeepAlive/2.0"})
+                    urllib.request.urlopen(req, timeout=5)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
 if __name__ == "__main__":
     ensure_single_instance()
