@@ -5928,8 +5928,8 @@ async def timer_cmd(ctx, *, args: str = None):
 
 # -------------------- TIMEOUT SYSTEM (BUNNY'S ORDER) --------------------
 
-@bot.command(name="timeout", aliases=["to"])
-async def timeout_cmd(ctx, member: Union[discord.Member, discord.User, int] = None, *, reason: str = "Disrespect / Toxicity"):
+@bot.command(name="timeout", aliases=["mute"])
+async def timeout_cmd(ctx, target: Optional[str] = None, *, reason: str = "Disrespect / Toxicity"):
     """
     Bunny's Technical Order: timeout anyone easily (by mention, username, ID, or even if they left the server).
     Usage: !timeout @user [reason] OR !timeout <user_id> [reason]
@@ -5942,7 +5942,7 @@ async def timeout_cmd(ctx, member: Union[discord.Member, discord.User, int] = No
             color=discord.Color.red()
         ))
 
-    if not member:
+    if not target:
         prefix = get_prefix_for_guild(ctx.guild.id if ctx.guild else None)
         return await ctx.send(
             f"⚠️ **Timeout Usage:**\n"
@@ -5952,24 +5952,18 @@ async def timeout_cmd(ctx, member: Union[discord.Member, discord.User, int] = No
         )
 
     target_member = None
-    if isinstance(member, discord.Member):
-        target_member = member
-    elif isinstance(member, discord.User):
+    clean_target = target.replace("<@", "").replace(">", "").replace("!", "").strip()
+    if clean_target.isdigit():
+        uid = int(clean_target)
         if ctx.guild:
-            target_member = ctx.guild.get_member(member.id)
-        if not target_member:
-            try:
-                target_member = await ctx.guild.fetch_member(member.id)
-            except Exception:
-                pass
-    elif isinstance(member, int):
-        if ctx.guild:
-            target_member = ctx.guild.get_member(member)
+            target_member = ctx.guild.get_member(uid)
             if not target_member:
                 try:
-                    target_member = await ctx.guild.fetch_member(member)
+                    target_member = await ctx.guild.fetch_member(uid)
                 except Exception:
                     pass
+    elif ctx.guild:
+        target_member = discord.utils.get(ctx.guild.members, name=target) or discord.utils.get(ctx.guild.members, display_name=target)
 
     # If still not found, try parsing from raw args string
     if not target_member and ctx.message.content:
@@ -6470,9 +6464,8 @@ async def on_message(message):
         "aiactivate", "aiwhitelist", "aiwl", "dmaccess", "dmacess", "dmacc", "dmallow", "dmchat"
     ])
 
-    # Check if the first word is a registered bot command
-    is_registered_bot_cmd = (bot.get_command(first_word) is not None)
-    is_any_cmd = message.content.startswith(prefix) or is_tr_cmd or is_imagine_cmd or is_music_cmd or is_other_cmd or is_registered_bot_cmd
+    # Explicit prefix-free command triggers
+    is_any_cmd = message.content.startswith(prefix) or is_tr_cmd or is_imagine_cmd or is_music_cmd or is_other_cmd
 
     # Channel Access & Trigger Rules:
     if is_ai_channel or is_in_dm:
@@ -6485,7 +6478,7 @@ async def on_message(message):
 
     if not should_process_as_ai:
         if not message.content.startswith(prefix):
-            if is_tr_cmd or is_imagine_cmd or is_music_cmd or is_other_cmd or is_registered_bot_cmd:
+            if is_tr_cmd or is_imagine_cmd or is_music_cmd or is_other_cmd:
                 message.content = prefix + message.content
         await bot.process_commands(message)
         return

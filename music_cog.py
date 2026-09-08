@@ -213,7 +213,7 @@ def get_ytdl_opts(custom: Optional[Dict[str, Any]] = None, use_cookies: bool = F
         'noplaylist': True,
         'quiet': True,
         'no_warnings': True,
-        'socket_timeout': 5,
+        'socket_timeout': 15,
         'source_address': '0.0.0.0',
         'extractor_args': {
             'youtube': {
@@ -1409,7 +1409,7 @@ class GuildPlayer:
                             'noplaylist': True,
                             'quiet': True,
                             'source_address': '0.0.0.0',
-                            'socket_timeout': 5,
+                            'socket_timeout': 15,
                             'extractor_args': {
                                 'youtube': {
                                     'player_client': ['android'],
@@ -3951,7 +3951,7 @@ class MusicCog(commands.Cog, name="Music"):
                             'no_warnings': True,
                             'noplaylist': True,
                             'source_address': '0.0.0.0',
-                            'socket_timeout': 5,
+                            'socket_timeout': 15,
                             'extractor_args': {
                                 'youtube': {
                                     'player_client': ['android'],
@@ -4054,7 +4054,7 @@ class MusicCog(commands.Cog, name="Music"):
                             'quiet': True,
                             'extract_flat': True,
                             'noplaylist': True,
-                            'socket_timeout': 6,
+                            'socket_timeout': 15,
                             'extractor_args': {
                                 'youtube': {
                                     'player_client': ['android'],
@@ -4080,7 +4080,7 @@ class MusicCog(commands.Cog, name="Music"):
                         'quiet': True,
                         'extract_flat': False,
                         'noplaylist': True,
-                        'socket_timeout': 6,
+                        'socket_timeout': 15,
                         'extractor_args': {
                             'youtube': {
                                 'player_client': ['android'],
