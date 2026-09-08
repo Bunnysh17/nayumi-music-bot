@@ -1,26 +1,30 @@
 FROM python:3.11-slim
 
-# Install system dependencies: OpenJDK 17 (for Lavalink), FFmpeg, libopus, and build essentials
+# Install FFmpeg and Opus audio codecs
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    openjdk-17-jre-headless \
     ffmpeg \
+    libopus0 \
     libopus-dev \
-    build-essential \
+    gcc \
+    python3-dev \
     git \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Copy requirements and install python packages
+# Install python dependencies
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
+    pip install --no-cache-dir -r requirements.txt
 
-# Copy all project files
+# Copy all code files
 COPY . .
 
-# Set environment
 ENV PYTHONUNBUFFERED=1
+ENV PORT=10000
 
-# Start the bot
+EXPOSE 10000
+
+# Start Bot & Health Server
 CMD ["python", "bot.py"]
