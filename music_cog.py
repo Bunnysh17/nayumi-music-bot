@@ -3065,9 +3065,8 @@ class MusicCog(commands.Cog, name="Music"):
         }
 
     async def cog_load(self):
-        # Auto-reconnect 24/7 channels on startup and maintain 24/7 watchdog
+        # Auto-reconnect 24/7 channels on startup
         asyncio.create_task(self.watchdog_247())
-        asyncio.create_task(self.voice_listener_watchdog())
 
     async def init_lavalink_pool(self):
         pass
@@ -3092,65 +3091,22 @@ class MusicCog(commands.Cog, name="Music"):
 
     async def connect_voice_channel(self, channel: discord.VoiceChannel, timeout: float = 20.0) -> Optional[discord.VoiceClient]:
         """
-        Connects to a voice channel using VoiceRecvClient for simultaneous high-fidelity audio playback
-        and real-time voice command receiving.
+        Connects to a voice channel cleanly using standard discord.VoiceClient for 100% stable playback.
         """
         player = self.get_player(channel.guild)
         vc = None
-        cls = getattr(voice_recv, 'VoiceRecvClient', None)
         try:
-            if cls:
-                vc = await channel.connect(timeout=timeout, reconnect=True, cls=cls)
-            else:
-                vc = await channel.connect(timeout=timeout, reconnect=True)
+            vc = await channel.connect(timeout=timeout, reconnect=True)
         except Exception as e:
-            print(f"[CONNECT VOICE RECV EXCEPTION] {channel.name}: {e}, retrying default connect...", flush=True)
-            try:
-                vc = await channel.connect(timeout=timeout, reconnect=True)
-            except Exception as f_ex:
-                print(f"[CONNECT VOICE FALLBACK ERROR] {channel.name}: {f_ex}", flush=True)
-                return None
+            print(f"[CONNECT VOICE ERROR] {channel.name}: {e}", flush=True)
+            return None
 
         if vc:
             player.voice_client = vc
-            # Attach VoiceCommandSink if supported
-            if hasattr(vc, "listen") and hasattr(vc, "is_listening"):
-                try:
-                    if not vc.is_listening():
-                        sink = VoiceCommandSink(self, channel.guild, vc)
-                        vc.listen(sink)
-                        player.voice_sink = sink
-                        print(f"[VOICE LISTENER] ✅ Attached VoiceCommandSink to '{channel.name}' in '{channel.guild.name}'.", flush=True)
-                except Exception as l_ex:
-                    print(f"[VOICE LISTENER ATTACH ERROR] {l_ex}", flush=True)
         return vc
 
     async def voice_listener_watchdog(self):
-        await self.bot.wait_until_ready()
-        print("[Voice Listener Watchdog] ✅ Started 24/7 voice recognition watchdog (3s heartbeat).", flush=True)
-        while not self.bot.is_closed():
-            try:
-                for guild in self.bot.guilds:
-                    vc = guild.voice_client
-                    if vc and is_vc_connected(vc) and hasattr(vc, "listen") and hasattr(vc, "is_listening"):
-                        player = self.get_player(guild)
-                        if not vc.is_listening():
-                            try:
-                                sink = VoiceCommandSink(self, guild, vc)
-                                vc.listen(sink)
-                                player.voice_sink = sink
-                                print(f"[WATCHDOG] 🔄 Re-attached VoiceCommandSink to '{vc.channel.name}' in '{guild.name}'.", flush=True)
-                            except Exception as e:
-                                print(f"[WATCHDOG ATTACH ERROR] {e}", flush=True)
-                        else:
-                            # Verify sink task is alive
-                            sink = getattr(player, 'voice_sink', None)
-                            if sink and isinstance(sink, VoiceCommandSink):
-                                if not sink._check_task or sink._check_task.done():
-                                    sink._check_task = self.bot.loop.create_task(sink._silence_checker())
-            except Exception:
-                pass
-            await asyncio.sleep(3)
+        pass
 
 
 
@@ -4762,18 +4718,7 @@ class MusicCog(commands.Cog, name="Music"):
                                         await asyncio.sleep(2.0)
                         asyncio.create_task(_auto_reconnect())
             elif after.channel and before.channel != after.channel:
-                # Bot moved to another voice channel -> ensure listener is attached immediately
-                bot_vc = member.guild.voice_client
-                if bot_vc and hasattr(bot_vc, "listen") and hasattr(bot_vc, "is_listening"):
-                    if not bot_vc.is_listening():
-                        try:
-                            player = self.get_player(member.guild)
-                            sink = VoiceCommandSink(self, member.guild, bot_vc)
-                            bot_vc.listen(sink)
-                            player.voice_sink = sink
-                            print(f"[Voice Move] ✅ Attached VoiceCommandSink to new channel '{after.channel.name}' in '{member.guild.name}'.", flush=True)
-                        except Exception:
-                            pass
+                pass
             return
 
         # 2. Handle member departures from bot's channel
