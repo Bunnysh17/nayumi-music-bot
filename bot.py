@@ -84,6 +84,22 @@ if not discord.opus.is_loaded():
                 break
         except Exception:
             pass
+
+_orig_opus_decode = getattr(discord.opus.Decoder, 'decode', None)
+if _orig_opus_decode:
+    def _safe_opus_decode(self, data, *, fec: bool = False):
+        try:
+            return _orig_opus_decode(self, data, fec=fec)
+        except Exception:
+            return b"\x00" * 3840
+    discord.opus.Decoder.decode = _safe_opus_decode
+
+import logging
+logging.getLogger("discord.ext.voice_recv").setLevel(logging.WARNING)
+logging.getLogger("discord.ext.voice_recv.reader").setLevel(logging.WARNING)
+logging.getLogger("discord.ext.voice_recv.gateway").setLevel(logging.WARNING)
+logging.getLogger("discord.voice_state").setLevel(logging.WARNING)
+
 import discord.gateway
 from discord.ext import commands
 from discord import app_commands
@@ -161,8 +177,8 @@ PROFILE_API_URL = os.getenv("PROFILE_API_URL", "https://suyashprofileapi.vercel.
 LEGACY_PROFILE_API_URL = "https://info.bhuwanhex.bond/info"
 PROFILE_IMAGE_API_URL = "https://suyashavatarapi-b4zy.vercel.app/profile-image"
 OUTFIT_IMAGE_API_URL = "https://suyashoutfitapi.vercel.app/outfit-image"
-PHONE_API_URL = os.getenv("PHONE_API_URL", "https://mani272api.netlify.app/api")
-PHONE_API_KEY = os.getenv("PHONE_API_KEY", "MANI-1A2C02E6-1791096505-6EFC224421C23CAB")
+PHONE_API_URL = os.getenv("PHONE_API_URL", "https://mani272api.xyz/api")
+PHONE_API_KEY = os.getenv("PHONE_API_KEY", "MANI-359D4868-1819987002-C9BE1CC5BC885D12")
 PHONE_FALLBACK_API_URL = os.getenv("PHONE_FALLBACK_API_URL", "https://numinfo-paid.noob73613.workers.dev/")
 BAN_API_URL = os.getenv("BAN_API_URL", "https://suyashbancheck.vercel.app/check")
 VEHICLE_API_URL = os.getenv("VEHICLE_API_URL", "https://all-api-by-nitin-developer-best1.binderdhaniya6.workers.dev/api")
@@ -170,17 +186,23 @@ VEHICLE_API_KEY = os.getenv("VEHICLE_API_KEY", "NITIN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 
-OWNER_IDS = [913264406912188456, 1438763359322247249]
+raw_owner_env = os.getenv("OWNER_ID", "913264406912188456,1438763359322247249,1459031472576008306")
+OWNER_IDS = list(set([int(x.strip()) for x in raw_owner_env.split(",") if x.strip().isdigit()] + [913264406912188456, 1438763359322247249, 1459031472576008306]))
 OWNER_ID = OWNER_IDS[0]
 TRUSTED_ADMIN_IDS = [1459031472576008306, 1468556165469311070]  # Suyash (Authorized Admin & Partner)
 
 def is_admin_or_owner(user_id: int, member: Any = None) -> bool:
     """
-    Checks if a user is a designated Bot Owner or Trusted Admin (Suyash).
-    STRICT: Server administrators have NO access to Bot Owner/Admin commands.
+    Checks if a user is a designated Bot Owner, Trusted Admin, or Guild Administrator.
     """
-    if user_id in OWNER_IDS or user_id in TRUSTED_ADMIN_IDS:
-        return True
+    try:
+        uid = int(user_id)
+        if uid in OWNER_IDS or uid in TRUSTED_ADMIN_IDS:
+            return True
+        if member and getattr(member, "guild_permissions", None) and member.guild_permissions.administrator:
+            return True
+    except Exception:
+        pass
     return False
 
 def get_user_display_greeting_name(user: Any) -> str:
@@ -431,33 +453,37 @@ def set_prefix_for_guild(guild_id, prefix):
 
 
 def is_noprefix_user(user_id):
-    if user_id in OWNER_IDS or user_id in TRUSTED_ADMIN_IDS:
-        return True
-
-    conn = db()
-    row = conn.execute("SELECT expires_at FROM noprefix_users WHERE user_id=?", (user_id,)).fetchone()
-    if not row:
-        conn.close()
-        return False
-
-    expires_at = row[0]
-    if not expires_at:
-        conn.close()
-        return True
-
     try:
-        expires = datetime.fromisoformat(expires_at)
+        uid = int(user_id)
+        if uid in OWNER_IDS or uid in TRUSTED_ADMIN_IDS or is_admin_or_owner(uid):
+            return True
+
+        conn = db()
+        row = conn.execute("SELECT expires_at FROM noprefix_users WHERE user_id=?", (uid,)).fetchone()
+        if not row:
+            conn.close()
+            return False
+
+        expires_at = row[0]
+        if not expires_at:
+            conn.close()
+            return True
+
+        try:
+            expires = datetime.fromisoformat(expires_at)
+        except Exception:
+            conn.close()
+            return False
+
+        if datetime.now(timezone.utc) < expires:
+            conn.close()
+            return True
+
+        conn.execute("DELETE FROM noprefix_users WHERE user_id=?", (uid,))
+        conn.commit()
+        conn.close()
     except Exception:
-        conn.close()
-        return False
-
-    if datetime.now(timezone.utc) < expires:
-        conn.close()
-        return True
-
-    conn.execute("DELETE FROM noprefix_users WHERE user_id=?", (user_id,))
-    conn.commit()
-    conn.close()
+        pass
     return False
 
 
@@ -515,12 +541,16 @@ def remove_whitelist_user(user_id):
 
 
 def is_whitelisted_user(user_id):
-    if user_id in OWNER_IDS:
-        return True
-    conn = db()
-    row = conn.execute("SELECT user_id FROM whitelisted_users WHERE user_id=?", (user_id,)).fetchone()
-    conn.close()
-    return row is not None
+    try:
+        uid = int(user_id)
+        if uid in OWNER_IDS or uid in TRUSTED_ADMIN_IDS or is_admin_or_owner(uid):
+            return True
+        conn = db()
+        row = conn.execute("SELECT user_id FROM whitelisted_users WHERE user_id=?", (uid,)).fetchone()
+        conn.close()
+        return row is not None
+    except Exception:
+        return False
 
 
 def list_whitelist_users():
@@ -715,19 +745,45 @@ async def call_api(api_id, params):
     return (post[0], {"post_response": post[1], "get_response": get[1], "sent_params": params}), "AUTO"
 
 
-async def call_direct_api(url, params):
-    timeout = aiohttp.ClientTimeout(total=90)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.get(url, params=params) as response:
-            text = await response.text()
-            status = response.status
+async def call_direct_api(url, params, retries=1):
+    last_status = 500
+    last_data = {}
+    for attempt in range(retries + 1):
+        try:
+            timeout = aiohttp.ClientTimeout(total=10)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(url, params=params) as response:
+                    text = await response.text()
+                    last_status = response.status
+            try:
+                last_data = json.loads(text)
+            except json.JSONDecodeError:
+                last_data = {"raw_response": text}
 
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError:
-        data = {"raw_response": text}
+            if last_status == 200:
+                # Check for Cloudflare upstream challenge in mani API
+                if isinstance(last_data, dict):
+                    res = last_data.get("result")
+                    if isinstance(res, dict):
+                        inner = res.get("result")
+                        if isinstance(inner, str) and ("<!DOCTYPE" in inner or "Cloudflare" in inner or "Just a moment" in inner):
+                            if attempt < retries:
+                                await asyncio.sleep(0.6)
+                                continue
+                            return 200, {"status": False, "message": "Upstream database temporarily busy. Please try again in a few seconds."}
+                return last_status, last_data
 
-    return status, data
+            if last_status in [502, 503, 504] and attempt < retries:
+                await asyncio.sleep(0.6)
+                continue
+            return last_status, last_data
+        except Exception as e:
+            last_status = 500
+            last_data = {"error": str(e)}
+            if attempt < retries:
+                await asyncio.sleep(0.6)
+                continue
+    return last_status, last_data
 
 
 async def fetch_profile_image(server, uid):
@@ -984,6 +1040,59 @@ def make_ff_profile_card(uid, response_data):
     return buf
 
 
+def format_ff_rank(r_id, pts=None, is_cs=False):
+    if not r_id or str(r_id) in ["N/A", "0", ""]:
+        return "Unranked"
+    try:
+        r = int(r_id)
+        if r < 300:
+            tier = "Bronze"
+        elif 300 <= r < 303:
+            tier = f"Bronze {r - 300 + 1}"
+        elif 303 <= r < 306:
+            tier = f"Silver {r - 303 + 1}"
+        elif 306 <= r < 310:
+            tier = f"Gold {r - 306 + 1}"
+        elif 310 <= r < 314:
+            tier = f"Platinum {r - 310 + 1}"
+        elif 314 <= r < 318:
+            tier = f"Diamond {r - 314 + 1}"
+        elif 318 <= r < 322:
+            tier = "Heroic"
+        elif 322 <= r < 325:
+            tier = "Master"
+        elif r >= 325:
+            tier = "Grandmaster"
+        else:
+            tier = f"Tier {r}"
+
+        unit = "stars" if is_cs else "pts"
+        if pts is not None and str(pts) not in ["N/A", "0", ""]:
+            return f"**{tier}** (`{pts}` {unit})"
+        return f"**{tier}**"
+    except Exception:
+        return f"`{r_id}`"
+
+
+def format_ff_gender(g):
+    g_str = str(g or "").upper()
+    if "MALE" in g_str and "FE" not in g_str:
+        return "Male"
+    if "FEMALE" in g_str:
+        return "Female"
+    return "Not Set"
+
+
+def format_ff_lang(l):
+    l_str = str(l or "").upper()
+    if "EN" in l_str:
+        return "English"
+    if "HI" in l_str:
+        return "Hindi"
+    clean = str(l or "").replace("LANGUAGE", "").replace("Language_", "").title().strip()
+    return clean if clean else "Default"
+
+
 def make_profile_embed(uid, response_data, image_url=None, server=None):
     class CaseInsensitiveDict(dict):
         def get(self, key, default=None):
@@ -1009,79 +1118,146 @@ def make_profile_embed(uid, response_data, image_url=None, server=None):
     pet = section("petInfo", "petinfo")
     credit = section("creditScoreInfo", "creditscoreinfo")
     diamond = section("diamondCostRes", "diamondcostres")
-    region_name, region_logo = format_region(basic.get("region", server))
+    region_name, _ = format_region(basic.get("region", server))
 
     nickname = str(basic.get('nickname', 'Unknown'))
     level = basic.get('level', 'N/A')
     exp = basic.get('exp', 'N/A')
     likes = basic.get('liked', 'N/A')
 
+    # Format numbers nicely
+    try:
+        exp_str = f"{int(exp):,}" if exp != "N/A" else "N/A"
+    except Exception:
+        exp_str = str(exp)
+
+    try:
+        likes_str = f"{int(likes):,}" if likes != "N/A" else "N/A"
+    except Exception:
+        likes_str = str(likes)
+
+    br_rank_str = format_ff_rank(basic.get('rank'), basic.get('rankingpoints', basic.get('rankingPoints')))
+    br_max_rank_str = format_ff_rank(basic.get('maxrank', basic.get('maxRank')))
+    cs_rank_str = format_ff_rank(basic.get('csrank', basic.get('csRank')), basic.get('csrankingpoints', basic.get('csRankingPoints')), is_cs=True)
+    cs_max_rank_str = format_ff_rank(basic.get('csmaxrank', basic.get('csMaxRank')), is_cs=True)
+
+    hippo_rank = basic.get('hipporank', basic.get('hippoRank'))
+    hippo_pts = basic.get('hipporankingpoints', basic.get('hippoRankingPoints'))
+
+    acc_type = str(basic.get('accountType', basic.get('accounttype', 'Regular')))
+    if acc_type == "1":
+        acc_type = "Regular"
+    version_val = str(basic.get('releaseVersion', basic.get('releaseversion', 'OB54')))
+
     embed = discord.Embed(
-        title=f"{E_CROWN} FREE FIRE PLAYER PROFILE",
+        title=f"{E_CROWN} Free Fire Player Profile",
         description=(
             f"### `{nickname}`\n"
-            f"> {E_USER} **UID:** `{uid}` • 🌐 **Region:** `{region_name}` {region_logo}\n"
-            f"> 🌟 **Account Type:** `{basic.get('accountType', 'Regular')}`"
+            f"> **UID:** `{uid}` • **Region:** `{region_name}`\n"
+            f"> **Account Type:** `{acc_type}` • **Version:** `{version_val}`"
         ),
         color=discord.Color.from_rgb(255, 45, 85)
     )
 
+    # 1. Player Stats
+    diamond_cost = diamond.get('diamondCost', diamond.get('diamondcost', 'N/A'))
+    stats_lines = [
+        f"> **Level:** `{level}`",
+        f"> **EXP:** `{exp_str}`",
+        f"> **Likes:** `{likes_str}`"
+    ]
+    if diamond_cost != "N/A":
+        stats_lines.append(f"> **Diamond Cost:** `{diamond_cost}`")
+
     embed.add_field(
-        name=f"{E_USER} PLAYER STATS",
-        value=(
-            f"> **Level:** `{level}`\n"
-            f"> **EXP:** `{exp}`\n"
-            f"> **Likes:** `{likes}`"
-        ),
+        name=f"{E_USER} Player Stats",
+        value="\n".join(stats_lines),
         inline=True
     )
 
+    # 2. Battle Royale & CS Rank Overview
+    rank_lines = [
+        f"> **BR Rank:** {br_rank_str}",
+        f"> **BR Max:** {br_max_rank_str}",
+        f"> **CS Rank:** {cs_rank_str}",
+        f"> **CS Max:** {cs_max_rank_str}"
+    ]
+    if hippo_rank or hippo_pts:
+        rank_lines.append(f"> **Lone Wolf:** Tier `{hippo_rank or 'N/A'}` (`{hippo_pts or '0'}` pts)")
+
     embed.add_field(
-        name=f"{E_FIRE} RANK STATS",
-        value=(
-            f"> **BR Rank:** `{basic.get('rank', 'N/A')}` (`{basic.get('rankingPoints', '0')}` pts)\n"
-            f"> **CS Rank:** `{basic.get('csRank', 'N/A')}` (`{basic.get('csRankingPoints', '0')}` pts)\n"
-            f"> **Max BR / CS:** `{basic.get('maxRank', 'N/A')}` / `{basic.get('csMaxRank', 'N/A')}`"
-        ),
+        name=f"{E_FIRE} Rank Overview",
+        value="\n".join(rank_lines),
         inline=True
     )
 
-    clan_name = clean_field(guild.get('clanName', 'No Clan'), 80)
-    clan_id = guild.get('clanId', 'N/A')
-    if clan_name and clan_name != "No Clan" and clan_name != "N/A":
-        clan_members = f"{guild.get('memberNum', 'N/A')}/{guild.get('capacity', 'N/A')}"
-        clan_owner = clean_field(guild_owner.get('nickname', 'N/A'), 80)
+    # 3. Clan / Guild Info
+    clan_name = clean_field(guild.get('clanName', guild.get('clanname', 'No Clan')), 80)
+    clan_id = guild.get('clanId', guild.get('clanid', 'N/A'))
+    if clan_name and clan_name not in ["No Clan", "N/A"]:
+        clan_lvl = guild.get('clanLevel', guild.get('clanlevel', 'N/A'))
+        clan_members = f"{guild.get('memberNum', guild.get('membernum', 'N/A'))}/{guild.get('capacity', 'N/A')}"
+        clan_owner = clean_field(guild_owner.get('nickname', guild.get('captainid', 'N/A')), 80)
+        clan_owner_lvl = guild_owner.get('level', 'N/A')
+        leader_info = f"`{clan_owner}` (Lvl {clan_owner_lvl})" if clan_owner_lvl != 'N/A' else f"`{clan_owner}`"
+
         embed.add_field(
-            name=f"{E_CROWN_2} CLAN / GUILD",
+            name=f"{E_DIAMOND} Guild / Clan",
             value=(
-                f"> **Name:** `{clan_name}`\n"
-                f"> **Level:** `{guild.get('clanLevel', 'N/A')}` • **Members:** `{clan_members}`\n"
-                f"> **Leader:** `{clan_owner}` (ID: `{clan_id}`)"
+                f"> **Name:** `{clan_name}` • **Level:** `{clan_lvl}`\n"
+                f"> **Members:** `{clan_members}` • **Clan ID:** `{clan_id}`\n"
+                f"> **Leader:** {leader_info}"
             ),
             inline=False
         )
 
+    # 4. Pet Info (if present)
+    pet_level = pet.get('level', 'N/A')
+    pet_exp = pet.get('exp', 'N/A')
+    pet_name = clean_field(pet.get('name', 'N/A'), 50)
+    if pet_level != "N/A" or (pet_name != "N/A" and pet_name != "No Pet"):
+        pet_title = f"`{pet_name}`" if pet_name not in ["N/A", "No Pet"] else "Active Pet"
+        embed.add_field(
+            name=f"{E_DETAILS} Pet Details",
+            value=f"> **Pet:** {pet_title} • **Level:** `{pet_level}` • **EXP:** `{pet_exp}`",
+            inline=False
+        )
+
+    # 5. Account Details & Activity
+    badge_cnt = basic.get('badgeCnt', basic.get('badgecnt', 'N/A'))
+    season_id = basic.get('seasonId', basic.get('seasonid', 'N/A'))
+    credit_score = credit.get('creditScore', credit.get('creditscore', '100'))
+    created_at = ff_time(basic.get('createAt', basic.get('createat')))
+    last_login = ff_time(basic.get('lastLoginAt', basic.get('lastloginat')))
+
     embed.add_field(
-        name=f"{E_DIAMOND} ACCOUNT DETAILS",
+        name=f"{E_SECURITY} Account & Activity",
         value=(
-            f"> **Badges:** `{basic.get('badgeCnt', 'N/A')}` (Season `{basic.get('seasonId', 'N/A')}`)\n"
-            f"> **Credit Score:** `{credit.get('creditScore', '100')}`\n"
-            f"> **Created:** `{ff_time(basic.get('createAt'))}`\n"
-            f"> **Last Online:** `{ff_time(basic.get('lastLoginAt'))}`"
+            f"> **Season:** `{season_id}` • **Badges:** `{badge_cnt}`\n"
+            f"> **Credit Score:** `{credit_score}/100`\n"
+            f"> **Created Date:** `{created_at}`\n"
+            f"> **Last Active:** `{last_login}`"
         ),
         inline=False
     )
 
-    sig = clean_field(social.get('signature', ''), 200)
-    if sig and sig != "N/A" and sig != "":
-        embed.add_field(
-            name=f"{E_GEAR} BIO & SOCIAL",
-            value=f"> *\"{sig}\"*\n> **Gender:** `{social.get('gender', 'N/A')}` • **Language:** `{social.get('language', 'N/A')}`",
-            inline=False
-        )
+    # 6. Bio & Social Info
+    sig = clean_field(social.get('signature', ''), 300)
+    gender_str = format_ff_gender(social.get('gender'))
+    lang_str = format_ff_lang(social.get('language'))
+
+    social_text = f"> **Gender:** `{gender_str}` • **Language:** `{lang_str}`"
+    if sig and sig not in ["N/A", ""]:
+        social_text += f"\n> **Signature:** *\"{sig}\"*"
+
+    embed.add_field(
+        name=f"{E_COMMANDS} Social & Bio",
+        value=social_text,
+        inline=False
+    )
 
     embed.set_image(url=image_url or f"{PROFILE_IMAGE_API_URL}?server={server or 'IND'}&uid={uid}&key=suyash")
-    embed.set_footer(text="Nayumi 🎀 • Premium Free Fire Intelligence")
+    embed.set_footer(text="Nayumi 🎀 • Free Fire Profile Intelligence")
     return embed
 
 
@@ -1187,53 +1363,61 @@ def parse_mani_api(data, term=""):
         return []
 
     records = []
-    raw_results = data.get("result", [])
-    if isinstance(raw_results, dict):
-        raw_results = [raw_results]
-    elif not isinstance(raw_results, list):
-        raw_results = []
 
-    for idx, src in enumerate(raw_results, start=1):
-        if not isinstance(src, dict):
-            continue
+    def normalize_dict_keys(d):
+        if not isinstance(d, dict):
+            return {}
+        return {str(k).lower().replace("_", "").replace("-", ""): v for k, v in d.items()}
 
-        # Check nested data (Hi-Tek / Parquet scanner format)
-        d = src.get("data")
-        if isinstance(d, dict):
-            inner = d.get("data")
-            if isinstance(inner, dict):
-                if inner.get("name") or inner.get("mobile") or inner.get("address") or inner.get("fname"):
+    def is_valid_phone_record(r):
+        if not isinstance(r, dict):
+            return False
+        d = normalize_dict_keys(r)
+        has_name = bool(d.get("name") or d.get("customername") or d.get("fullname"))
+        has_mobile = bool(d.get("phonenumber") or d.get("mobile") or d.get("phone") or d.get("number"))
+        has_address = bool(d.get("address") or d.get("fulladdress"))
+        has_father = bool(d.get("fathersname") or d.get("fathername") or d.get("fname") or d.get("careof") or d.get("co"))
+        has_aadhar = bool(d.get("aadharnumber") or d.get("aadhar") or d.get("id") or d.get("docid"))
+        return has_name or has_mobile or has_address or has_father or has_aadhar
+
+    # Structure 1: data["result"]["results"] -> list of record dicts (New mani272api.xyz standard)
+    res_obj = data.get("result")
+    if isinstance(res_obj, dict):
+        sub_results = res_obj.get("results") or res_obj.get("result") or res_obj.get("data")
+        if isinstance(sub_results, list):
+            for r in sub_results:
+                if is_valid_phone_record(r):
+                    records.append(r)
+        elif is_valid_phone_record(sub_results):
+            records.append(sub_results)
+    elif isinstance(res_obj, list):
+        for r in res_obj:
+            if isinstance(r, dict):
+                inner = r.get("data") or r.get("result") or r
+                if is_valid_phone_record(inner):
                     records.append(inner)
-            elif d.get("name") or d.get("mobile") or d.get("address") or d.get("fname"):
-                records.append(d)
 
-        # Check result list (Telecom / KYC format)
-        res = src.get("result")
-        if isinstance(res, list):
-            for item in res:
-                if isinstance(item, dict) and (item.get("name") or item.get("mobile") or item.get("address") or item.get("fname")):
-                    records.append(item)
-        elif isinstance(res, dict):
-            if res.get("name") or res.get("mobile") or res.get("address") or res.get("fname"):
-                records.append(res)
+    # Structure 2: Direct or legacy results
+    if not records:
+        raw_results = data.get("results") or data.get("data") or []
+        if isinstance(raw_results, list):
+            for r in raw_results:
+                if is_valid_phone_record(r):
+                    records.append(r)
+        elif is_valid_phone_record(raw_results):
+            records.append(raw_results)
 
-        # Direct fields
-        if ("name" in src or "mobile" in src or "address" in src) and "source" not in src and "status" not in src:
-            records.append(src)
-
-    # Fallback if no records found via Mani structure
+    # Structure 3: Fallback deep search
     if not records:
         def find_records(node, depth=0):
             if depth > 10:
                 return []
             found = []
             if isinstance(node, dict):
-                keys_lower = {str(k).lower(): k for k in node.keys()}
-                phone_fields = ['name', 'mobile', 'fname', 'father_name', 'address', 'circle', 'alt', 'email', 'id']
-                matches = [k for k in phone_fields if k in keys_lower]
-                if len(matches) >= 2:
-                    name_val = node.get(keys_lower.get('name', ''))
-                    mobile_val = node.get(keys_lower.get('mobile', ''))
+                if is_valid_phone_record(node):
+                    d = normalize_dict_keys(node)
+                    name_val = d.get("name") or d.get("customername")
+                    mobile_val = d.get("phonenumber") or d.get("mobile")
                     if not isinstance(name_val, (dict, list)) and not isinstance(mobile_val, (dict, list)):
                         found.append(node)
                         return found
@@ -1253,7 +1437,11 @@ def parse_mani_api(data, term=""):
 extract_phone_records = parse_mani_api
 
 def redacted_phone_json(number, status, data):
-    hidden_keys = {"developer", "whatsapp", "discord", "developer_name", "buy_from"}
+    hidden_keys = {
+        "developer", "whatsapp", "discord", "developer_name", "developerinfo", "buy_from",
+        "request_time", "key_days_left", "key_expires", "key_expiry",
+        "api_key", "key", "key_owner", "key_usage", "key_created", "key_enabled"
+    }
 
     def redact(value, key=""):
         if str(key).lower() in hidden_keys:
@@ -1319,10 +1507,14 @@ class ProfileJsonView(discord.ui.View):
             await interaction.response.send_message("This result belongs to another user.", ephemeral=True)
             return
 
-        hidden_keys = {"developer", "developer_name", "developerinfo", "buy_from"}
+        hidden_keys = {
+            "developer", "whatsapp", "discord", "developer_name", "developerinfo", "buy_from",
+            "request_time", "key_days_left", "key_expires", "key_expiry",
+            "api_key", "key", "key_owner", "key_usage", "key_created", "key_enabled"
+        }
 
         def clean(value, key=""):
-            if key.lower() in hidden_keys:
+            if str(key).lower() in hidden_keys:
                 return None
             if isinstance(value, dict):
                 return {
@@ -1361,7 +1553,10 @@ class VehicleJsonView(discord.ui.View):
             await interaction.response.send_message("This result belongs to another user.", ephemeral=True)
             return
 
-        hidden_keys = {"owner", "channel", "api_key", "key_owner", "key_usage", "key_created", "key_expiry", "key_enabled"}
+        hidden_keys = {
+            "owner", "channel", "api_key", "key_owner", "key_usage", "key_created", "key_expiry", "key_enabled",
+            "request_time", "key_days_left", "key_expires", "developer", "whatsapp", "discord", "developer_name", "buy_from"
+        }
 
         def clean(value, key=""):
             if str(key).lower() in hidden_keys:
@@ -1467,112 +1662,152 @@ def make_vehicle_embed(reg_no, data):
 def make_phone_embed(term, data, alt_data=None):
     raw_records = parse_mani_api(data, term)
 
-    seen = set()
-    unique_records = []
+    all_records = []
     for r in raw_records:
         if not isinstance(r, dict):
             continue
-        mobile = clean_field(r.get("mobile") or r.get("MOBILE") or r.get("phone") or r.get("number") or term, 180)
-        name = clean_field(r.get("name") or r.get("NAME") or r.get("customer_name"), 180)
-        father = clean_field(r.get("fname") or r.get("father_name") or r.get("FATHER_NAME") or r.get("care_of"), 180)
-        address = clean_field(r.get("address") or r.get("ADDRESS") or r.get("full_address"), 350)
-        circle = clean_field(r.get("circle") or r.get("CIRCLE") or r.get("operator") or r.get("telecom_circle"), 180)
-        alt = clean_field(r.get("alt") or r.get("alternate_mobile") or r.get("alt_mobile") or r.get("ALT_MOBILE"), 180)
+        mobile = clean_field(
+            r.get("phoneNumber") or r.get("phone_number") or r.get("mobile") or r.get("MOBILE") or 
+            r.get("phone") or r.get("number") or term, 180
+        )
+        name = clean_field(
+            r.get("name") or r.get("NAME") or r.get("customer_name") or r.get("full_name"), 180
+        )
+        father = clean_field(
+            r.get("fathersName") or r.get("father_name") or r.get("fathers_name") or 
+            r.get("FATHER_NAME") or r.get("fname") or r.get("care_of") or r.get("c_o"), 180
+        )
+        aadhar = clean_field(
+            r.get("aadharNumber") or r.get("aadhar_number") or r.get("aadhar") or 
+            r.get("id") or r.get("id_number") or r.get("doc_id") or r.get("uid"), 180
+        )
+        alt = clean_field(
+            r.get("otherNumber") or r.get("other_number") or r.get("alt") or 
+            r.get("alternate_mobile") or r.get("alt_mobile") or r.get("ALT_MOBILE") or r.get("alt_phone"), 180
+        )
+
+        # Clean Address string (remove '!' separators and 'NA!' prefixes from scrapers)
+        raw_addr = r.get("address") or r.get("ADDRESS") or r.get("full_address") or ""
+        if raw_addr:
+            raw_addr = re.sub(r'^(NA!|NA\s+)+', '', str(raw_addr), flags=re.IGNORECASE)
+            raw_addr = re.sub(r'!+', ', ', str(raw_addr))
+            raw_addr = re.sub(r'\s+', ' ', raw_addr).strip(' ,')
+        address = clean_field(raw_addr, 350)
+
+        # Combine circle / state / district / town / pincode if available
+        circle_parts = []
+        if r.get("circle") or r.get("CIRCLE") or r.get("operator"):
+            circle_parts.append(str(r.get("circle") or r.get("CIRCLE") or r.get("operator")).strip())
+        if r.get("state") and str(r.get("state")).strip().upper() not in [p.upper() for p in circle_parts]:
+            circle_parts.append(str(r.get("state")).strip())
+        if r.get("source") and str(r.get("source")).strip().upper() not in [p.upper() for p in circle_parts] and str(r.get("source")).lower() != "inddata":
+            circle_parts.append(str(r.get("source")).strip())
+
+        circle = clean_field(" / ".join(circle_parts) if circle_parts else "N/A", 180)
         email = clean_field(r.get("email") or r.get("EMAIL") or r.get("mail"), 180)
 
-        if name == "N/A" and father == "N/A" and address == "N/A" and circle == "N/A":
+        if name == "N/A" and father == "N/A" and address == "N/A" and aadhar == "N/A":
             continue
 
-        dedup_key = (name.lower(), father.lower(), mobile, alt, circle.lower(), address.lower().replace(" ", "").replace(",", "").replace("-", ""))
-        if dedup_key in seen:
-            continue
-        seen.add(dedup_key)
-
-        unique_records.append({
+        all_records.append({
             "name": name,
             "father": father,
             "mobile": mobile,
-            "circle": circle,
+            "aadhar": aadhar,
             "alt": alt,
+            "circle": circle,
             "email": email,
             "address": address,
         })
 
     embed = discord.Embed(
         title=f"{E_TICK} Phone Number Info",
-        description=f"{E_PING} Lookup Result For: `{term}`",
+        description=f"{E_PING} Lookup Result For: `{term}` (Total Records: `{len(all_records)}`)",
         color=discord.Color.green()
     )
 
-    if not unique_records:
+    if not all_records:
         message = data.get("message", "No readable phone records found.") if isinstance(data, dict) else "No readable phone records found."
         embed.add_field(name=f"{E_CROSS} No Data Found", value=clean_field(message, 900), inline=False)
         embed.set_footer(text="Premium Phone Lookup | Developed by Bunny")
         return embed
 
-    # Primary Records
-    for count, r in enumerate(unique_records[:3], start=1):
+    # Display ALL Primary Records (up to 20 records per embed)
+    for count, r in enumerate(all_records[:20], start=1):
+        fields_str = [
+            f"**Name:** `{r['name']}`",
+            f"**Father Name:** `{r['father']}`",
+            f"**Mobile:** `{r['mobile']}`"
+        ]
+        if r['aadhar'] != "N/A" and r['aadhar'] != "NA":
+            fields_str.append(f"**Aadhar Number:** `{r['aadhar']}`")
+        if r['alt'] != "N/A" and r['alt'] != "NA":
+            fields_str.append(f"**Alt Number:** `{r['alt']}`")
+        if r['circle'] != "N/A":
+            fields_str.append(f"**Circle / State:** `{r['circle']}`")
+        if r['email'] != "N/A":
+            fields_str.append(f"**Email:** `{r['email']}`")
+        fields_str.append(f"**Address:** `{r['address']}`")
+
         embed.add_field(
             name=f"{E_DIAMOND} Record {count}",
-            value=(
-                f"**Name:** `{r['name']}`\n"
-                f"**Father Name:** `{r['father']}`\n"
-                f"**Mobile:** `{r['mobile']}`\n"
-                f"**Circle:** `{r['circle']}`\n"
-                f"**Alt Number:** `{r['alt']}`\n"
-                f"**Email:** `{r['email']}`\n"
-                f"**Address:** `{r['address']}`"
-            ),
+            value="\n".join(fields_str),
             inline=False
         )
 
     # Alt Number Info (if available)
     if alt_data and isinstance(alt_data, dict):
         raw_alt_records = parse_mani_api(alt_data)
-        alt_seen = set()
-        unique_alt = []
+        all_alt = []
         for r in raw_alt_records:
             if not isinstance(r, dict):
                 continue
-            mobile = clean_field(r.get("mobile") or r.get("MOBILE") or r.get("phone") or r.get("number"), 180)
+            mobile = clean_field(r.get("phoneNumber") or r.get("phone_number") or r.get("mobile") or r.get("MOBILE") or r.get("phone") or r.get("number"), 180)
             name = clean_field(r.get("name") or r.get("NAME") or r.get("customer_name"), 180)
-            father = clean_field(r.get("fname") or r.get("father_name") or r.get("FATHER_NAME") or r.get("care_of"), 180)
-            address = clean_field(r.get("address") or r.get("ADDRESS") or r.get("full_address"), 350)
-            circle = clean_field(r.get("circle") or r.get("CIRCLE") or r.get("operator") or r.get("telecom_circle"), 180)
-            alt = clean_field(r.get("alt") or r.get("alternate_mobile") or r.get("alt_mobile") or r.get("ALT_MOBILE"), 180)
+            father = clean_field(r.get("fathersName") or r.get("father_name") or r.get("fathers_name") or r.get("FATHER_NAME") or r.get("fname") or r.get("care_of"), 180)
+            aadhar = clean_field(r.get("aadharNumber") or r.get("aadhar_number") or r.get("aadhar") or r.get("id"), 180)
+            raw_addr = r.get("address") or r.get("ADDRESS") or r.get("full_address") or ""
+            if raw_addr:
+                raw_addr = re.sub(r'^(NA!|NA\s+)+', '', str(raw_addr), flags=re.IGNORECASE)
+                raw_addr = re.sub(r'!+', ', ', str(raw_addr))
+                raw_addr = re.sub(r'\s+', ' ', raw_addr).strip(' ,')
+            address = clean_field(raw_addr, 350)
+            circle = clean_field(r.get("circle") or r.get("CIRCLE") or r.get("operator") or r.get("telecom_circle") or r.get("state") or "N/A", 180)
+            alt = clean_field(r.get("otherNumber") or r.get("other_number") or r.get("alt") or r.get("alternate_mobile") or r.get("alt_mobile") or r.get("ALT_MOBILE"), 180)
             email = clean_field(r.get("email") or r.get("EMAIL") or r.get("mail"), 180)
 
-            if name == "N/A" and father == "N/A" and address == "N/A" and circle == "N/A":
+            if name == "N/A" and father == "N/A" and address == "N/A" and aadhar == "N/A":
                 continue
 
-            dedup_key = (name.lower(), father.lower(), mobile, alt, circle.lower(), address.lower().replace(" ", "").replace(",", "").replace("-", ""))
-            if dedup_key in alt_seen or dedup_key in seen:
-                continue
-            alt_seen.add(dedup_key)
-
-            unique_alt.append({
+            all_alt.append({
                 "name": name,
                 "father": father,
                 "mobile": mobile,
+                "aadhar": aadhar,
                 "circle": circle,
                 "alt": alt,
                 "email": email,
                 "address": address,
             })
 
-        for count, r in enumerate(unique_alt[:2], start=1):
-            label = f"{E_DIAMOND} Alt Number Info" if len(unique_alt) == 1 else f"{E_DIAMOND} Alt Number Record {count}"
+        for count, r in enumerate(all_alt[:5], start=1):
+            label = f"{E_DIAMOND} Alt Number Record {count}" if len(all_alt) > 1 else f"{E_DIAMOND} Alt Number Info"
+            alt_fields_str = [
+                f"**Name:** `{r['name']}`",
+                f"**Father Name:** `{r['father']}`",
+                f"**Mobile:** `{r['mobile']}`"
+            ]
+            if r['aadhar'] != "N/A" and r['aadhar'] != "NA":
+                alt_fields_str.append(f"**Aadhar Number:** `{r['aadhar']}`")
+            if r['alt'] != "N/A" and r['alt'] != "NA":
+                alt_fields_str.append(f"**Alt Number:** `{r['alt']}`")
+            if r['circle'] != "N/A":
+                alt_fields_str.append(f"**Circle / State:** `{r['circle']}`")
+            alt_fields_str.append(f"**Address:** `{r['address']}`")
+
             embed.add_field(
                 name=label,
-                value=(
-                    f"**Name:** `{r['name']}`\n"
-                    f"**Father Name:** `{r['father']}`\n"
-                    f"**Mobile:** `{r['mobile']}`\n"
-                    f"**Circle:** `{r['circle']}`\n"
-                    f"**Alt Number:** `{r['alt']}`\n"
-                    f"**Email:** `{r['email']}`\n"
-                    f"**Address:** `{r['address']}`"
-                ),
+                value="\n".join(alt_fields_str),
                 inline=False
             )
 
@@ -2314,9 +2549,59 @@ def get_role_config(guild_id, key):
     return data.get(str(guild_id), {}).get(key)
 
 
+# -------------------- SERVICES WHITELIST SYSTEM --------------------
+SERVICES_WHITELIST_FILE = "services_whitelist.json"
+
+def load_services_whitelist() -> List[int]:
+    if not os.path.exists(SERVICES_WHITELIST_FILE):
+        return []
+    try:
+        with open(SERVICES_WHITELIST_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return [int(uid) for uid in data if str(uid).isdigit()]
+    except Exception:
+        return []
+
+def save_services_whitelist(whitelist: List[int]):
+    try:
+        with open(SERVICES_WHITELIST_FILE, "w", encoding="utf-8") as f:
+            json.dump(list(set([int(uid) for uid in whitelist if str(uid).isdigit()])), f, indent=2)
+    except Exception:
+        pass
+
+def add_services_whitelist_user(user_id: int) -> bool:
+    uid = int(user_id)
+    wl = load_services_whitelist()
+    if uid not in wl:
+        wl.append(uid)
+        save_services_whitelist(wl)
+        return True
+    return False
+
+def remove_services_whitelist_user(user_id: int) -> bool:
+    uid = int(user_id)
+    wl = load_services_whitelist()
+    if uid in wl:
+        wl = [u for u in wl if u != uid]
+        save_services_whitelist(wl)
+        return True
+    return False
+
+def is_services_whitelisted(user_id: int) -> bool:
+    try:
+        uid = int(user_id)
+        if uid in OWNER_IDS:
+            return True
+        return uid in load_services_whitelist()
+    except Exception:
+        return False
+
+
 FREE_COMMANDS = {"profile", "bancheck", "vehicle", "pincode", "biochange", "jwt", "bypasskey", "whitelistuid"}
 
 def has_free_access(member):
+    if is_services_whitelisted(member.id):
+        return True
     role_id = get_role_config(member.guild.id, "free_role_id")
     if not role_id:
         return False
@@ -2499,6 +2784,10 @@ async def command_access_guard(ctx, command_name):
     if is_admin_or_owner(ctx.author.id, ctx.author if isinstance(ctx.author, discord.Member) else None):
         return True
 
+    # Services Whitelist Bypass (Full access even if server or command is disabled)
+    if is_services_whitelisted(ctx.author.id):
+        return True
+
     if not ctx.guild:
         await deny_command_access(ctx, f"{E_CROSS} Server Only", "This command cannot be used in direct messages.")
         return False
@@ -2544,6 +2833,9 @@ async def command_channel_check(ctx):
     # Complete Owner & Admin Bypass
     if is_admin_or_owner(ctx.author.id, ctx.author if isinstance(ctx.author, discord.Member) else None):
         return True
+    # Complete Services Whitelist Bypass
+    if is_services_whitelisted(ctx.author.id):
+        return True
     if ctx.command.name in CHANNEL_CONTROL_COMMANDS:
         return True
 
@@ -2579,7 +2871,7 @@ def remove_premium_role_id(guild_id):
 def has_premium_access(member):
     if is_admin_or_owner(member.id, member if isinstance(member, discord.Member) else None):
         return True
-    if member.id in OWNER_IDS:
+    if member.id in OWNER_IDS or is_services_whitelisted(member.id):
         return True
     role_id = get_premium_role_id(member.guild.id)
     if not role_id:
@@ -2601,6 +2893,147 @@ async def deny_premium_access(ctx):
     embed.set_footer(text="Nayumi 🎀 • Premium Access System")
     await ctx.send(embed=embed)
 
+
+# -------------------- SERVICES WHITELIST COMMANDS --------------------
+
+@bot.command(name="serviceswhitelist", aliases=["servicewhitelist", "swhitelist", "swl"])
+async def serviceswhitelist_cmd(ctx, *args):
+    """Whitelist a user for full unrestricted access to all service/lookup commands."""
+    if ctx.author.id not in OWNER_IDS:
+        embed = discord.Embed(
+            title=f"{E_CROSS} Owner Permission Required",
+            description="❌ Only Bot Owners (`👑 Bunny`) can manage Services Whitelist!",
+            color=discord.Color.red()
+        )
+        return await ctx.send(embed=embed)
+
+    if not args:
+        users = load_services_whitelist()
+        embed = discord.Embed(
+            title=f"{E_CROWN} Services Whitelist System",
+            description=(
+                f">>> **Services Whitelisted Users** can execute all services commands (`phone`, `aadhar`, `vehicle`, `profile`, `bancheck`, `pincode`, etc.) even if commands/servers are disabled!\n\n"
+                f"**Total Whitelisted Users:** `{len(users)}`"
+            ),
+            color=discord.Color.from_rgb(220, 45, 95)
+        )
+        if users:
+            lines = [f"• <@{uid}> (`{uid}`)" for uid in users]
+            desc_lines = "\n".join(lines[:25])
+            if len(lines) > 25:
+                desc_lines += f"\n*...and {len(lines) - 25} more*"
+            embed.add_field(name=f"{E_DIAMOND} Authorized Users", value=desc_lines, inline=False)
+        else:
+            embed.add_field(name=f"{E_DIAMOND} Authorized Users", value="*No users whitelisted yet.*", inline=False)
+        embed.add_field(
+            name=f"{E_GEAR} Usage",
+            value=(
+                f"`{DEFAULT_PREFIX}serviceswhitelist @user / <user_id>` (Add user)\n"
+                f"`{DEFAULT_PREFIX}servicesunwhitelist @user / <user_id>` (Remove user)\n"
+                f"`{DEFAULT_PREFIX}serviceswhitelist list` (View all)"
+            ),
+            inline=False
+        )
+        embed.set_footer(text="Nayumi 🎀 • Services Whitelist Engine")
+        return await ctx.send(embed=embed)
+
+    action = args[0].lower()
+    target_str = args[1] if len(args) > 1 and action in ["add", "set", "+", "remove", "del", "delete", "-"] else args[0]
+    is_remove = action in ["remove", "del", "delete", "-"]
+
+    if action == "list" and len(args) == 1:
+        users = load_services_whitelist()
+        embed = discord.Embed(
+            title=f"{E_CROWN} Services Whitelist List",
+            description=f"**Total Authorized:** `{len(users)}`\n\n" + ("\n".join(f"• <@{uid}> (`{uid}`)" for uid in users) if users else "*No users in whitelist.*"),
+            color=discord.Color.from_rgb(220, 45, 95)
+        )
+        embed.set_footer(text="Nayumi 🎀 • Services Whitelist Engine")
+        return await ctx.send(embed=embed)
+
+    target_id = None
+    if ctx.message.mentions:
+        target_id = ctx.message.mentions[0].id
+    else:
+        digits = "".join(c for c in target_str if c.isdigit())
+        if digits:
+            target_id = int(digits)
+
+    if not target_id:
+        embed = discord.Embed(
+            title=f"{E_CROSS} Invalid Target",
+            description="Please mention a valid user or provide a numeric user ID.",
+            color=discord.Color.red()
+        )
+        return await ctx.send(embed=embed)
+
+    if is_remove:
+        removed = remove_services_whitelist_user(target_id)
+        if removed:
+            embed = discord.Embed(
+                title=f"{E_TICK} Services Whitelist Removed",
+                description=f"✅ <@{target_id}> (`{target_id}`) has been **removed** from Services Whitelist.",
+                color=discord.Color.orange()
+            )
+        else:
+            embed = discord.Embed(
+                title=f"{E_WARNING} Not in Whitelist",
+                description=f"User <@{target_id}> (`{target_id}`) was not in the Services Whitelist.",
+                color=discord.Color.orange()
+            )
+    else:
+        add_services_whitelist_user(target_id)
+        embed = discord.Embed(
+            title=f"{E_TICK} Services Whitelist Granted",
+            description=(
+                f"🌟 <@{target_id}> (`{target_id}`) is now **Services Whitelisted**!\n\n"
+                f"**Privileges Granted:**\n"
+                f"• 📱 Can use `phone`, `num`, `vehicle`, `profile`, `bancheck`, `pincode`, etc.\n"
+                f"• 🔓 **Bypasses server whitelist** & command disabled restrictions.\n"
+                f"• 🚀 Works across all channels and servers."
+            ),
+            color=discord.Color.green()
+        )
+    embed.set_footer(text="Nayumi 🎀 • Services Whitelist Engine")
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="servicesunwhitelist", aliases=["serviceunwhitelist", "sunwhitelist", "sunwl"])
+async def servicesunwhitelist_cmd(ctx, target: str = None):
+    """Remove a user from the Services Whitelist."""
+    if ctx.author.id not in OWNER_IDS:
+        embed = discord.Embed(
+            title=f"{E_CROSS} Owner Permission Required",
+            description="❌ Only Bot Owners (`👑 Bunny`) can manage Services Whitelist!",
+            color=discord.Color.red()
+        )
+        return await ctx.send(embed=embed)
+
+    if not target and not ctx.message.mentions:
+        embed = discord.Embed(
+            title=f"{E_CROSS} Missing Argument",
+            description=f"Usage: `{DEFAULT_PREFIX}servicesunwhitelist @user / <user_id>`",
+            color=discord.Color.red()
+        )
+        return await ctx.send(embed=embed)
+
+    target_id = ctx.message.mentions[0].id if ctx.message.mentions else int("".join(c for c in target if c.isdigit()))
+    removed = remove_services_whitelist_user(target_id)
+    if removed:
+        embed = discord.Embed(
+            title=f"{E_TICK} Services Whitelist Removed",
+            description=f"✅ <@{target_id}> (`{target_id}`) has been **removed** from Services Whitelist.",
+            color=discord.Color.orange()
+        )
+    else:
+        embed = discord.Embed(
+            title=f"{E_WARNING} Not in Whitelist",
+            description=f"User <@{target_id}> (`{target_id}`) was not in the Services Whitelist.",
+            color=discord.Color.orange()
+        )
+    embed.set_footer(text="Nayumi 🎀 • Services Whitelist Engine")
+    await ctx.send(embed=embed)
+
 async def execute_service(ctx, command_name, values):
     if not await command_access_guard(ctx, command_name):
         return
@@ -2617,9 +3050,15 @@ async def execute_service(ctx, command_name, values):
     msg = await ctx.send(embed=processing_embed)
     try:
         if command_name == "profile":
-            if len(values) < 2:
-                raise ValueError(f"Missing argument. Usage: {DEFAULT_PREFIX}profile <server> <uid>")
-            server, uid = values[0].upper(), values[1]
+            if not values:
+                raise ValueError(f"Missing argument. Usage: {DEFAULT_PREFIX}profile [server] <uid>")
+            if len(values) == 1:
+                server, uid = "IND", values[0]
+            else:
+                if values[0].isdigit() and not values[1].isdigit():
+                    uid, server = values[0], values[1].upper()
+                else:
+                    server, uid = values[0].upper(), values[1]
             profile_task = asyncio.create_task(call_direct_api(PROFILE_API_URL, {"server": server, "uid": uid}))
             image_task = asyncio.create_task(fetch_profile_image(server, uid))
             status, data = await profile_task
@@ -2628,9 +3067,15 @@ async def execute_service(ctx, command_name, values):
             sent_params = {"server": server, "uid": uid}
             info = API_MAP[command_name]
         elif command_name == "bancheck":
-            if len(values) < 2:
-                raise ValueError(f"Missing argument. Usage: {DEFAULT_PREFIX}bancheck <server> <uid>")
-            server, uid = values[0].upper(), values[1]
+            if not values:
+                raise ValueError(f"Missing argument. Usage: {DEFAULT_PREFIX}bancheck [server] <uid>")
+            if len(values) == 1:
+                server, uid = "IND", values[0]
+            else:
+                if values[0].isdigit() and not values[1].isdigit():
+                    uid, server = values[0], values[1].upper()
+                else:
+                    server, uid = values[0].upper(), values[1]
             status, data = await call_direct_api(BAN_API_URL, {"uid": uid})
             method = "GET"
             sent_params = {"server": server, "uid": uid}
@@ -2649,49 +3094,32 @@ async def execute_service(ctx, command_name, values):
             else:
                 number = raw_input
 
-            params = {}
-            if "mani272api.vercel.app" in PHONE_API_URL or PHONE_API_KEY:
-                params = {"key": PHONE_API_KEY, "type": "num", "q": number}
-            else:
-                params = {"num": number}
+            params = {"key": PHONE_API_KEY, "type": "num", "q": number} if PHONE_API_KEY else {"num": number}
 
-            status, data = await call_direct_api(PHONE_API_URL, params)
+            status, data = await call_direct_api(PHONE_API_URL, params, retries=1)
 
-            # Auto-fallback to Worker API if primary API fails or yields no records
             primary_records = parse_mani_api(data, number) if isinstance(data, dict) else []
-            if status != 200 or not primary_records:
-                try:
-                    fb_status, fb_data = await call_direct_api(PHONE_FALLBACK_API_URL, {"num": number})
-                    if fb_status == 200 and isinstance(fb_data, dict):
-                        fb_records = parse_mani_api(fb_data, number)
-                        if fb_records:
-                            status, data = fb_status, fb_data
-                            primary_records = fb_records
-                except Exception:
-                    pass
 
-            # Auto-fetch Alt number info if available in primary records
+            # Optional fast Alt number lookup if available
             alt_data = None
             if primary_records:
                 for r in primary_records:
-                    raw_alt = clean_field(r.get("alt") or r.get("alternate_mobile") or r.get("alt_mobile"))
-                    if raw_alt != "N/A":
+                    raw_alt = clean_field(
+                        r.get("otherNumber") or r.get("other_number") or r.get("alt") or 
+                        r.get("alternate_mobile") or r.get("alt_mobile") or r.get("alt_phone")
+                    )
+                    if raw_alt != "N/A" and raw_alt != "NA":
                         alt_digits = "".join(c for c in raw_alt if c.isdigit())
                         if len(alt_digits) > 10 and alt_digits.startswith("91"):
                             alt_digits = alt_digits[2:]
                         elif len(alt_digits) > 10 and alt_digits.startswith("0"):
                             alt_digits = alt_digits.lstrip("0")
                         if len(alt_digits) == 10 and alt_digits != number:
-                            alt_params = {"key": PHONE_API_KEY, "type": "num", "q": alt_digits} if ("mani272api.vercel.app" in PHONE_API_URL or PHONE_API_KEY) else {"num": alt_digits}
+                            alt_params = {"key": PHONE_API_KEY, "type": "num", "q": alt_digits} if PHONE_API_KEY else {"num": alt_digits}
                             try:
-                                _, alt_data = await call_direct_api(PHONE_API_URL, alt_params)
-                                if not parse_mani_api(alt_data, alt_digits):
-                                    _, alt_data = await call_direct_api(PHONE_FALLBACK_API_URL, {"num": alt_digits})
+                                _, alt_data = await call_direct_api(PHONE_API_URL, alt_params, retries=0)
                             except Exception:
-                                try:
-                                    _, alt_data = await call_direct_api(PHONE_FALLBACK_API_URL, {"num": alt_digits})
-                                except Exception:
-                                    alt_data = None
+                                alt_data = None
                             break
 
             method = "GET"
@@ -2734,8 +3162,8 @@ async def execute_service(ctx, command_name, values):
             return
 
         if command_name == "profile" and ok:
-            server = sent_params.get("server", values[0])
-            uid = sent_params.get("uid", values[1])
+            server = sent_params.get("server", "IND")
+            uid = sent_params.get("uid", values[0] if values else "N/A")
             image_file = None
             image_url = None
             if profile_image:
@@ -2752,8 +3180,8 @@ async def execute_service(ctx, command_name, values):
             return
 
         if command_name == "bancheck":
-            server = sent_params.get("server", values[0])
-            uid = sent_params.get("uid", values[1])
+            server = sent_params.get("server", "IND")
+            uid = sent_params.get("uid", values[0] if values else "N/A")
             profile_status, profile_data = await call_direct_api(
                 PROFILE_API_URL,
                 {"server": server, "uid": uid}
@@ -2827,7 +3255,12 @@ async def send_safe_premium_embed(ctx, command_name, sent_params, data, info, ok
         rows=[]
         if isinstance(obj, dict):
             for k,v in obj.items():
-                if str(k).lower() in ["success","cached","proxyused","attempt","owner"]:
+                if str(k).lower() in [
+                    "success", "cached", "proxyused", "attempt", "owner",
+                    "request_time", "key_days_left", "key_expires", "key_expiry",
+                    "api_key", "key", "key_owner", "key_usage", "key_created", "key_enabled",
+                    "developer", "whatsapp", "discord", "developer_name", "buy_from"
+                ]:
                     continue
                 key=(prefix+str(k)).replace("_"," ").title()
                 if isinstance(v, dict):
@@ -2876,17 +3309,27 @@ async def send_safe_premium_embed(ctx, command_name, sent_params, data, info, ok
     embed.set_footer(text="Nayumi 🎀 • Premium Utility Panel")
     await ctx.send(embed=embed)
 
+SERVICE_COMMAND_ALIASES = {
+    "phone": ["phonelookup"],
+    "vehicle": ["veh", "rc", "rcinfo"],
+    "profile": ["ffprofile", "player", "ffinfo"],
+    "bancheck": ["ffban", "ban"],
+    "pincode": ["pin", "zip", "postal"],
+}
+
 def create_service_command(command_name):
     async def callback(ctx, *values):
         await execute_service(ctx, command_name, list(values))
 
     info = API_MAP[command_name]
     callback.__name__ = f"{command_name}_cmd"
+    aliases = SERVICE_COMMAND_ALIASES.get(command_name, [])
 
     return commands.Command(
         callback,
         name=command_name,
-        help=info["usage"]
+        help=info["usage"],
+        aliases=aliases
     )
 
 
@@ -4399,13 +4842,14 @@ async def execute_autonomous_ai_actions(message, reply_text: str, is_owner: bool
             except Exception:
                 pass
 
+    is_whitelisted = is_ai_user_whitelisted(message.author.id) if message and hasattr(message, "author") else False
     # 3. Standby Action: [ACTION:STANDBY]
-    if "[ACTION:STANDBY]" in reply_text.upper() and is_owner:
+    if "[ACTION:STANDBY]" in reply_text.upper() and (is_owner or is_whitelisted):
         set_standby_state(True, message.channel.id)
         executed_actions.append("Standby")
 
     # 4. Wakeup Action: [ACTION:WAKEUP]
-    if "[ACTION:WAKEUP]" in reply_text.upper() and is_owner:
+    if "[ACTION:WAKEUP]" in reply_text.upper() and (is_owner or is_whitelisted):
         set_standby_state(False)
         executed_actions.append("Wakeup")
 
@@ -5240,6 +5684,34 @@ async def aiwhitelist_cmd(ctx, target: Union[discord.Member, discord.User, str] 
         )
         embed.set_footer(text="Developed by Bunny • Nayumi AI")
         return await ctx.send(embed=embed)
+
+
+@bot.command(name="sleep", aliases=["standby", "soja", "sojao"])
+async def sleep_cmd(ctx):
+    """Puts Nayumi into complete sleep/standby mode (Owner, Admins, Whitelisted AI users)."""
+    if not (is_admin_or_owner(ctx.author.id, getattr(ctx, "author", None)) or is_ai_user_whitelisted(ctx.author.id)):
+        return await ctx.send("❌ Only Bot Owners, Admins, aur **AI Whitelisted Users** Nayumi ko sleep/standby mode me daal sakte hain!")
+
+    set_standby_state(True, ctx.channel.id)
+    speaker_disp = get_user_display_greeting_name(ctx.author)
+    if speaker_disp == "Bunny Sir":
+        await ctx.send("Ji Bunny Sir, main abhi complete sleep / standby mode me ja rahi hoon... 🔌💤 Ab jab tak aap mujhe 'turn on', 'on ho jao', ya 'wake up' nahi bologe, main bilkul silent rahoongi. Bye bye! 🌙")
+    else:
+        await ctx.send(f"Theek hai {speaker_disp}, main abhi complete sleep / standby mode me ja rahi hoon... 🔌💤 Jab bhi bulana ho `!wake` ya 'wake up' bol dena! Bye bye! 🌙✨")
+
+
+@bot.command(name="wakeup", aliases=["wake", "on", "jaago", "uthjao"])
+async def wakeup_cmd(ctx):
+    """Wakes Nayumi up from sleep/standby mode (Owner, Admins, Whitelisted AI users)."""
+    if not (is_admin_or_owner(ctx.author.id, getattr(ctx, "author", None)) or is_ai_user_whitelisted(ctx.author.id)):
+        return await ctx.send("❌ Only Bot Owners, Admins, aur **AI Whitelisted Users** Nayumi ko wake up kar sakte hain!")
+
+    set_standby_state(False)
+    speaker_disp = get_user_display_greeting_name(ctx.author)
+    if speaker_disp == "Bunny Sir":
+        await ctx.send("Aankh khul gayi Bunny Sir! ⚡👑 Main wapas online aa gayi hoon, boliye kya order hai aapka? 🎀✨")
+    else:
+        await ctx.send(f"Aankh khul gayi {speaker_disp}! ⚡ Main wapas online aa gayi hoon, boliye kya help chahiye? 🎀✨")
 
 
 @bot.command(name="dmaccess", aliases=["dmacess", "dmacc", "dmchat", "dmallow", "dmwl"])
@@ -6450,10 +6922,56 @@ async def on_message(message):
     is_ai_channel = channel_info.get("active") and channel_info.get("channel_id") == message.channel.id
 
     prefix = get_prefix_for_guild(message.guild.id if message.guild else None)
-    low_content = message.content.strip().lower()
-    first_word = low_content.split()[0] if low_content else ""
+    content = message.content.strip()
+    low_content = content.lower()
 
-    # Check if message addresses Nayumi in ANY channel (e.g. "nayumi ...", "naymi ...", "hey nayumi", or bot is mentioned)
+    # Detect if bot is mentioned at the start of the message (e.g. "@Nayumi stats", "<@1500772711885049916> help")
+    bot_id = bot.user.id if bot.user else 0
+    mention_pattern = rf"^<@!?{bot_id}>\s*"
+    is_bot_mentioned_at_start = bool(re.match(mention_pattern, content)) if bot_id else False
+    text_without_mention = re.sub(mention_pattern, "", content).strip() if is_bot_mentioned_at_start else content
+
+    # Check if message is just a standalone mention of the bot
+    if is_bot_mentioned_at_start and not text_without_mention:
+        embed = discord.Embed(
+            title=f"{E_CROWN} Nayumi 🎀",
+            description=(
+                f"**Hey {message.author.mention}!**\n\n"
+                f"• **Server Prefix:** `{prefix}`\n"
+                f"• **Help Menu:** `{prefix}help`\n"
+                f"• **Services:** `{prefix}services`\n"
+                f"• **Music:** `{prefix}play <song>`"
+            ),
+            color=discord.Color.from_rgb(220, 45, 95)
+        )
+        embed.set_footer(text="Developed by Bunny • Nayumi 🎀")
+        await message.reply(embed=embed, mention_author=False)
+        return
+
+    # Determine candidate command token
+    starts_with_prefix = content.startswith(prefix) and len(content) > len(prefix)
+    
+    if starts_with_prefix:
+        cmd_token = content[len(prefix):].strip().split()[0].lower() if content[len(prefix):].strip() else ""
+    elif is_bot_mentioned_at_start:
+        cmd_token = text_without_mention.split()[0].lower() if text_without_mention else ""
+    else:
+        cmd_token = content.split()[0].lower() if content else ""
+
+    matched_cmd = bot.get_command(cmd_token) if cmd_token else None
+    has_np_access = is_noprefix_user(message.author.id) or is_admin_or_owner(message.author.id, getattr(message, "author", None))
+
+    is_command_call = False
+    if matched_cmd:
+        if starts_with_prefix or is_bot_mentioned_at_start or has_np_access:
+            is_command_call = True
+
+    # Fallback checks for common shortcuts
+    if not is_command_call:
+        if any(low_content.startswith(c) for c in ["tr ", "imagine ", "draw ", "p ", "play ", "skip", "pause", "resume", "stop", "queue", "np", "nowplaying", "vol ", "volume ", "loop", "247"]):
+            is_command_call = True
+
+    # Check if message addresses Nayumi conversationally
     is_called_by_name = False
     if low_content.startswith("nayumi") or low_content.startswith("naymi") or "nayumi" in low_content.split() or "naymi" in low_content.split():
         is_called_by_name = True
@@ -6462,34 +6980,23 @@ async def on_message(message):
 
     admin_display_name = get_user_display_greeting_name(message.author)
 
-    # Check if message is a command (even without prefix like 'p ...', 'play ...', 'skip', 'tr eg', etc.)
-    is_tr_cmd = low_content.startswith("tr ") or low_content == "tr" or low_content.startswith("translate ") or low_content == "translate"
-    is_imagine_cmd = low_content.startswith("imagine ") or low_content.startswith("draw ") or low_content.startswith("genimage ")
-    is_music_cmd = any(low_content.startswith(c) for c in [
-        "p ", "play ", "skip", "pause", "resume", "stop", "queue", "np", "nowplaying",
-        "vol ", "volume ", "loop", "previous", "prev", "back", "skipto ", "join", "leave", "dc", "disconnect", "clear", "247"
-    ])
-    is_other_cmd = any(low_content.startswith(c) for c in [
-        "ai ", "help", "ping", "services", "access", "owner", "aiclear", "aideactivate", "aistatus",
-        "aiactivate", "aiwhitelist", "aiwl", "dmaccess", "dmacess", "dmacc", "dmallow", "dmchat"
-    ])
-
-    # Explicit prefix-free command triggers
-    is_any_cmd = message.content.startswith(prefix) or is_tr_cmd or is_imagine_cmd or is_music_cmd or is_other_cmd
-
     # Channel Access & Trigger Rules:
-    if is_ai_channel or is_in_dm:
-        should_process_as_ai = not is_any_cmd
+    if is_command_call:
+        should_process_as_ai = False
+    elif is_ai_channel or is_in_dm:
+        should_process_as_ai = True
     else:
         if is_admin_or_owner_speaking or is_whitelisted_ai_user:
-            should_process_as_ai = (is_called_by_name or is_shutdown_trigger(low_content) or is_wakeup_trigger(low_content)) and not is_any_cmd
+            should_process_as_ai = (is_called_by_name or is_shutdown_trigger(low_content) or is_wakeup_trigger(low_content))
         else:
             should_process_as_ai = False
 
     if not should_process_as_ai:
-        if not message.content.startswith(prefix):
-            if is_tr_cmd or is_imagine_cmd or is_music_cmd or is_other_cmd:
-                message.content = prefix + message.content
+        if is_bot_mentioned_at_start:
+            message.content = prefix + text_without_mention
+        elif not starts_with_prefix and (has_np_access or is_command_call):
+            message.content = prefix + content
+
         await bot.process_commands(message)
         return
 

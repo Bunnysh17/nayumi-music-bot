@@ -47,6 +47,58 @@ if not discord.opus.is_loaded():
             pass
 from discord.ext import commands
 import discord.ext.voice_recv as voice_recv
+
+# -------------------- BULLETPROOF OPUS DECODER & PACKET ROUTER PATCH --------------------
+# Discord Voice streams frequently send RTCP / DTX silence / jitter packets that can trigger
+# OpusError: corrupted stream (OPUS_INVALID_PACKET). We patch Decoder.decode to return 20ms silence
+# instead of crashing the router thread.
+_orig_opus_decode = getattr(discord.opus.Decoder, 'decode', None)
+if _orig_opus_decode:
+    def _safe_opus_decode(self, data: Optional[bytes], *, fec: bool = False) -> bytes:
+        try:
+            return _orig_opus_decode(self, data, fec=fec)
+        except Exception:
+            return b"\x00" * 3840
+    discord.opus.Decoder.decode = _safe_opus_decode
+
+import logging
+logging.getLogger("discord.ext.voice_recv").setLevel(logging.WARNING)
+logging.getLogger("discord.ext.voice_recv.reader").setLevel(logging.WARNING)
+logging.getLogger("discord.ext.voice_recv.gateway").setLevel(logging.WARNING)
+logging.getLogger("discord.voice_state").setLevel(logging.WARNING)
+
+try:
+    import discord.ext.voice_recv.router as _v_router
+    _orig_router_run = getattr(_v_router.PacketRouter, '_do_run', None)
+    if _orig_router_run:
+        def _safe_router_do_run(self):
+            while not (hasattr(self, '_end') and self._end.is_set()):
+                try:
+                    _orig_router_run(self)
+                    break
+                except Exception:
+                    time.sleep(0.02)
+                    continue
+        _v_router.PacketRouter._do_run = _safe_router_do_run
+except Exception:
+    pass
+
+try:
+    import discord.ext.voice_recv.reader as _v_reader
+    _orig_reader_run = getattr(_v_reader.AudioReader, '_do_run', None)
+    if _orig_reader_run:
+        def _safe_reader_do_run(self):
+            while not (hasattr(self, '_end') and self._end.is_set()):
+                try:
+                    _orig_reader_run(self)
+                    break
+                except Exception:
+                    time.sleep(0.02)
+                    continue
+        _v_reader.AudioReader._do_run = _safe_reader_do_run
+except Exception:
+    pass
+
 import speech_recognition as sr
 from pydub import AudioSegment
 from discord.http import Route
@@ -141,9 +193,46 @@ VC_ANIMATED_EMOJIS = [
     "<a:cute:1543148562706079754>",
 ]
 
-OWNER_IDS = [913264406912188456, 1438763359322247249]
+raw_owner_env = os.getenv("OWNER_ID", "913264406912188456,1438763359322247249,1459031472576008306")
+OWNER_IDS = list(set([int(x.strip()) for x in raw_owner_env.split(",") if x.strip().isdigit()] + [913264406912188456, 1438763359322247249, 1459031472576008306]))
 TRUSTED_ADMIN_IDS = [1459031472576008306, 1468556165469311070]
 AI_USER_WHITELIST_FILE = "ai_user_whitelist.json"
+
+STANDBY_FILE = "nayumi_standby.json"
+
+def get_standby_state() -> dict:
+    if os.path.exists(STANDBY_FILE):
+        try:
+            with open(STANDBY_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"is_sleeping": False, "sleep_time": "", "channel_id": ""}
+
+def set_standby_state(is_sleeping: bool, channel_id: int = 0):
+    from datetime import datetime
+    state = {
+        "is_sleeping": is_sleeping,
+        "sleep_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S") if is_sleeping else "",
+        "channel_id": str(channel_id)
+    }
+    try:
+        with open(STANDBY_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f, indent=2)
+    except Exception:
+        pass
+
+def is_ai_whitelisted_user(user_id: int) -> bool:
+    if user_id in OWNER_IDS or user_id in TRUSTED_ADMIN_IDS:
+        return True
+    try:
+        if os.path.exists(AI_USER_WHITELIST_FILE):
+            with open(AI_USER_WHITELIST_FILE, "r", encoding="utf-8") as f:
+                wl = json.load(f)
+                return user_id in wl or str(user_id) in [str(x) for x in wl]
+    except Exception:
+        pass
+    return False
 
 def is_whitelisted_voice_user(user: Any, guild: Optional[discord.Guild] = None) -> bool:
     if isinstance(user, discord.Member):
@@ -215,8 +304,14 @@ def get_ytdl_opts(custom: Optional[Dict[str, Any]] = None, use_cookies: bool = F
         'no_warnings': True,
         'socket_timeout': 15,
         'source_address': '0.0.0.0',
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'ios', 'mweb', 'web'],
+                'player_skip': ['configs', 'webpage']
+            }
+        },
         'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
             'Accept-Language': 'en-US,en;q=0.9',
         }
     }
@@ -289,12 +384,11 @@ def is_vc_connected(vc: Any) -> bool:
         return False
     if hasattr(vc, "is_connected"):
         try:
-            if callable(vc.is_connected) and vc.is_connected():
-                return True
+            if callable(vc.is_connected):
+                return bool(vc.is_connected())
+            return bool(vc.is_connected)
         except Exception:
-            pass
-    if getattr(vc, 'channel', None) is not None:
-        return True
+            return False
     if hasattr(vc, "connected"):
         c = getattr(vc, "connected")
         if hasattr(c, "is_set"):
@@ -1189,9 +1283,9 @@ def decrypt_saavn_media_url(enc_url: str) -> Optional[str]:
 class BufferedAudioSource(discord.AudioSource):
     """
     Ultra high-performance audio ring buffer that completely decouples network reading from Discord Voice packet delivery.
-    Pre-buffers 15 seconds of 48kHz stereo PCM in RAM and delivers continuous 20ms frames with zero dropouts.
+    Pre-buffers audio in RAM and delivers continuous 20ms frames with zero dropouts.
     """
-    def __init__(self, original_source: discord.AudioSource, buffer_seconds: float = 15.0, prefill_frames: int = 50):
+    def __init__(self, original_source: discord.AudioSource, buffer_seconds: float = 10.0):
         self.original_source = original_source
         self.max_frames = int(buffer_seconds * 50)
         self.buffer: queue.Queue = queue.Queue(maxsize=self.max_frames)
@@ -1209,10 +1303,9 @@ class BufferedAudioSource(discord.AudioSource):
                     break
                 while not self._stopped.is_set():
                     try:
-                        self.buffer.put(data, timeout=0.2)
+                        self.buffer.put(data, timeout=0.1)
                         break
                     except queue.Full:
-                        time.sleep(0.01)
                         continue
             except Exception:
                 self._finished = True
@@ -1227,7 +1320,7 @@ class BufferedAudioSource(discord.AudioSource):
             if self._finished and self.buffer.empty():
                 return b""
             try:
-                return self.buffer.get(timeout=0.1)
+                return self.buffer.get(timeout=0.05)
             except queue.Empty:
                 if self._finished:
                     return b""
@@ -1235,6 +1328,11 @@ class BufferedAudioSource(discord.AudioSource):
 
     def cleanup(self):
         self._stopped.set()
+        while not self.buffer.empty():
+            try:
+                self.buffer.get_nowait()
+            except Exception:
+                break
         if hasattr(self.original_source, "cleanup"):
             try:
                 self.original_source.cleanup()
@@ -1297,6 +1395,7 @@ class GuildPlayer:
         self.play_id: int = 0
         self.played_uris: set = set()
         self.played_titles: set = set()
+        self.voice_sink: Optional[Any] = None
 
     def set_volume(self, vol: int):
         self.volume = max(1, min(100, int(vol)))
@@ -1339,8 +1438,8 @@ class GuildPlayer:
             if fstr:
                 af_filters.append(fstr)
         if af_filters:
-            return f"-vn -ar 48000 -ac 2 -af \"{','.join(af_filters)}\""
-        return "-vn -ar 48000 -ac 2"
+            return f"-vn -af \"{','.join(af_filters)}\""
+        return "-vn"
 
     async def play_track(self, track: Track, seek_ms: int = 0):
         if not is_vc_connected(self.voice_client):
@@ -1348,11 +1447,20 @@ class GuildPlayer:
                 self.voice_client = self.guild.voice_client
             elif self.voice_client and getattr(self.voice_client, "channel", None):
                 try:
-                    self.voice_client = await self.voice_client.channel.connect(timeout=15.0, reconnect=True)
+                    self.voice_client = await self.cog.connect_voice_channel(self.voice_client.channel, timeout=15.0)
                 except Exception as ex:
                     print(f"[play_track] Reconnection error: {ex}")
                     return
             else:
+                row_247 = get_247(self.guild.id)
+                if row_247:
+                    ch = self.guild.get_channel(row_247[0])
+                    if ch and isinstance(ch, discord.VoiceChannel):
+                        try:
+                            self.voice_client = await self.cog.connect_voice_channel(ch, timeout=15.0)
+                        except Exception:
+                            pass
+            if not self.voice_client or not is_vc_connected(self.voice_client):
                 return
 
         self.cancel_idle_timer()
@@ -1389,45 +1497,60 @@ class GuildPlayer:
             track.direct_url_time = time.time()
 
         if not stream_target:
-            loop = asyncio.get_event_loop()
-            def _extract_live_audio():
-                if track.uri and track.uri.startswith("http") and "open.spotify.com" not in track.uri and "spotify" not in track.uri:
-                    target_query = track.uri
-                else:
-                    target_query = f"ytsearch1:{track.title} {track.author or ''}"
-
-                for use_ck in [False, True]:
-                    try:
-                        ydl_cfg = get_ytdl_opts({
-                            'format': 'bestaudio/best',
-                            'noplaylist': True,
-                            'quiet': True,
-                            'source_address': '0.0.0.0',
-                            'socket_timeout': 15,
-                        }, use_cookies=use_ck)
-                        with yt_dlp.YoutubeDL(ydl_cfg) as ydl:
-                            info = ydl.extract_info(target_query, download=False)
-                            if info and 'entries' in info and info['entries']:
-                                entry = info['entries'][0]
-                                if not track.thumbnail and entry.get('thumbnail'):
-                                    track.thumbnail = entry.get('thumbnail')
-                                if entry.get('url'):
-                                    return entry.get('url')
-                            elif info and info.get('url'):
-                                if not track.thumbnail and info.get('thumbnail'):
-                                    track.thumbnail = info.get('thumbnail')
-                                return info.get('url')
-                    except Exception as ex:
-                        print(f"[play_track] _extract_live_audio error: {ex}", flush=True)
-                return None
-
-            live_url = await loop.run_in_executor(None, _extract_live_audio)
-            if live_url and ("googlevideo.com" in live_url or "manifest" in live_url or live_url.startswith("http")):
-                stream_target = live_url
-                track.direct_url = stream_target
-                track.direct_url_time = time.time()
+            # Tier 1: JioSaavn CDN direct 320kbps lossless resolution (Cloud Hosting & Nexcloud immune)
+            if not (track.uri and ("youtube.com" in track.uri or "youtu.be" in track.uri)):
+                try:
+                    saavn_res = await self.cog.resolve_saavn_track(f"{track.title} {track.author or ''}", track.requester)
+                    if saavn_res and saavn_res.direct_url:
+                        stream_target = saavn_res.direct_url
+                        track.direct_url = stream_target
+                        track.direct_url_time = time.time()
+                        if not track.thumbnail and saavn_res.thumbnail:
+                            track.thumbnail = saavn_res.thumbnail
+                except Exception as s_ex:
+                    print(f"[play_track] Saavn extract error: {s_ex}", flush=True)
 
             if not stream_target:
+                loop = asyncio.get_event_loop()
+                def _extract_live_audio():
+                    if track.uri and track.uri.startswith("http") and "open.spotify.com" not in track.uri and "spotify" not in track.uri:
+                        target_query = track.uri
+                    else:
+                        target_query = f"ytsearch1:{track.title} {track.author or ''}"
+
+                    for use_ck in [False, True]:
+                        try:
+                            ydl_cfg = get_ytdl_opts({
+                                'format': 'bestaudio/best',
+                                'noplaylist': True,
+                                'quiet': True,
+                                'source_address': '0.0.0.0',
+                                'socket_timeout': 15,
+                            }, use_cookies=use_ck)
+                            with yt_dlp.YoutubeDL(ydl_cfg) as ydl:
+                                info = ydl.extract_info(target_query, download=False)
+                                if info and 'entries' in info and info['entries']:
+                                    entry = info['entries'][0]
+                                    if not track.thumbnail and entry.get('thumbnail'):
+                                        track.thumbnail = entry.get('thumbnail')
+                                    if entry.get('url'):
+                                        return entry.get('url')
+                                elif info and info.get('url'):
+                                    if not track.thumbnail and info.get('thumbnail'):
+                                        track.thumbnail = info.get('thumbnail')
+                                    return info.get('url')
+                        except Exception as ex:
+                            print(f"[play_track] _extract_live_audio error: {ex}", flush=True)
+                    return None
+
+                live_url = await loop.run_in_executor(None, _extract_live_audio)
+                if live_url and ("googlevideo.com" in live_url or "manifest" in live_url or live_url.startswith("http")):
+                    stream_target = live_url
+                    track.direct_url = stream_target
+                    track.direct_url_time = time.time()
+
+            if not stream_target:
+                loop = asyncio.get_event_loop()
                 def _extract_sc():
                     try:
                         clean_queries = extract_clean_song_queries(track.title, track.author or "")
@@ -1448,6 +1571,17 @@ class GuildPlayer:
                     track.direct_url = stream_target
                     track.direct_url_time = time.time()
 
+            # Final Fallback to JioSaavn if YouTube/SoundCloud failed
+            if not stream_target:
+                try:
+                    saavn_res = await self.cog.resolve_saavn_track(f"{track.title} {track.author or ''}", track.requester)
+                    if saavn_res and saavn_res.direct_url:
+                        stream_target = saavn_res.direct_url
+                        track.direct_url = stream_target
+                        track.direct_url_time = time.time()
+                except Exception:
+                    pass
+
             if not stream_target or not stream_target.startswith("http"):
                 print(f"[play_track] Could not resolve stream URL for {track.title}")
                 self.bot.loop.create_task(self.play_next())
@@ -1464,8 +1598,8 @@ class GuildPlayer:
 
         try:
             raw_source = discord.FFmpegPCMAudio(stream_target, executable=FFMPEG_EXECUTABLE, before_options=before_opts, options=opts)
-            vol_source = discord.PCMVolumeTransformer(raw_source, volume=self.volume / 100.0)
-            buffered_source = BufferedAudioSource(vol_source, buffer_seconds=10.0)
+            buffered_source = BufferedAudioSource(raw_source, buffer_seconds=4.0)
+            vol_source = discord.PCMVolumeTransformer(buffered_source, volume=self.volume / 100.0)
         except Exception as e:
             import traceback
             print(f"Error creating audio source: {e}", flush=True)
@@ -1485,21 +1619,37 @@ class GuildPlayer:
                 print(f"Playback error: {err}", flush=True)
             self.bot.loop.create_task(self.on_track_end())
 
+        # Verify voice client is still connected before play
+        if not is_vc_connected(self.voice_client):
+            if is_vc_connected(self.guild.voice_client):
+                self.voice_client = self.guild.voice_client
+            else:
+                print(f"[play_track] Voice client disconnected before playback could start.")
+                if vol_source:
+                    vol_source.cleanup()
+                return
+
         if hasattr(self.voice_client, "is_playing") and (self.voice_client.is_playing() or self.voice_client.is_paused()):
-            self.voice_client.stop()
+            try:
+                self.voice_client.stop()
+            except Exception:
+                pass
 
         try:
-            self.voice_client.play(buffered_source, after=after_callback)
+            self.voice_client.play(vol_source, after=after_callback)
         except Exception as play_ex:
             import traceback
             print(f"[play_track play error]: {play_ex}", flush=True)
             traceback.print_exc()
+            if vol_source:
+                vol_source.cleanup()
             if self.home_channel:
                 self.bot.loop.create_task(self.home_channel.send(embed=discord.Embed(
                     description=f"{E_ALERT} **Voice Client Play Error:** `{play_ex}`",
                     color=ANKUSH_COLOR
                 )))
-            self.bot.loop.create_task(self.play_next())
+            if "Not connected to voice" not in str(play_ex):
+                self.bot.loop.create_task(self.play_next())
             return
 
         if seek_ms == 0 and self.voice_client and self.voice_client.channel:
@@ -1528,6 +1678,10 @@ class GuildPlayer:
                 print(f"Failed to send Now Playing card: {ex}")
 
     async def on_track_end(self):
+        # Do not discard/skip queue if voice client unexpectedly disconnected
+        if not is_vc_connected(self.voice_client) and not is_vc_connected(self.guild.voice_client):
+            return
+
         if self.loop_mode == "track" and self.current:
             await self.play_track(self.current)
             return
@@ -1637,15 +1791,12 @@ class MusicControlView(discord.ui.View):
 
         if player.is_paused:
             self.btn_pause.label = "Resume"
-            self.btn_pause.style = discord.ButtonStyle.success
         else:
             self.btn_pause.label = "Pause"
-            self.btn_pause.style = discord.ButtonStyle.secondary
 
-        if player.loop_mode != "off":
-            self.btn_loop.style = discord.ButtonStyle.success
-        else:
-            self.btn_loop.style = discord.ButtonStyle.secondary
+        q_count = len(player.queue)
+        self.btn_queue.label = f"Queue ({q_count})"
+        self.btn_vol.label = f"Vol: {player.volume}%"
 
     async def check_user_voice(self, interaction: discord.Interaction) -> Optional[GuildPlayer]:
         player = self.cog.players.get(self.guild_id)
@@ -1663,6 +1814,7 @@ class MusicControlView(discord.ui.View):
 
         return player
 
+    # ---------------- ROW 0 ----------------
     @discord.ui.button(label="Pause", style=discord.ButtonStyle.secondary, row=0, custom_id="m_btn_pause")
     async def btn_pause(self, interaction: discord.Interaction, button: discord.ui.Button):
         player = await self.check_user_voice(interaction)
@@ -1680,7 +1832,6 @@ class MusicControlView(discord.ui.View):
                 description=f">>> Resumed **[{player.current.title}]({player.current.uri})**",
                 color=discord.Color.green()
             )
-            res_embed.set_footer(text="Developed by Bunny")
             await interaction.response.send_message(embed=res_embed, ephemeral=True)
         else:
             player.voice_client.pause()
@@ -1693,8 +1844,25 @@ class MusicControlView(discord.ui.View):
                 description=f">>> Paused **[{player.current.title}]({player.current.uri})**",
                 color=ANKUSH_COLOR
             )
-            res_embed.set_footer(text="Developed by Bunny")
             await interaction.response.send_message(embed=res_embed, ephemeral=True)
+
+    @discord.ui.button(label="Prev", style=discord.ButtonStyle.secondary, row=0, custom_id="m_btn_prev")
+    async def btn_prev(self, interaction: discord.Interaction, button: discord.ui.Button):
+        player = await self.check_user_voice(interaction)
+        if not player or not player.voice_client:
+            return
+
+        if player.history:
+            prev_track = player.history.pop()
+            if player.current:
+                player.queue.insert(0, player.current)
+            await player.play_track(prev_track)
+            await interaction.response.send_message(embed=discord.Embed(description=f"{E_PREV} Playing previous track: **[{prev_track.title}]({prev_track.uri})**", color=discord.Color.green()), ephemeral=True)
+        elif player.current:
+            await player.play_track(player.current)
+            await interaction.response.send_message(embed=discord.Embed(description=f"{E_PREV} No previous track in history. Replaying **[{player.current.title}]({player.current.uri})** from start.", color=discord.Color.green()), ephemeral=True)
+        else:
+            await interaction.response.send_message(embed=discord.Embed(description=f"{E_ALERT} No previous track in history!", color=ANKUSH_COLOR), ephemeral=True)
 
     @discord.ui.button(label="Skip", style=discord.ButtonStyle.secondary, row=0, custom_id="m_btn_skip")
     async def btn_skip(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1703,23 +1871,12 @@ class MusicControlView(discord.ui.View):
             return
 
         skipped_track = player.current
-        next_track = player.queue[0] if player.queue else (player.prefetched_autoplay if player.autoplay else None)
         player.voice_client.stop()
-        
         embed = discord.Embed(
             title=f"{E_SKIP} Track Skipped",
-            description=(
-                f">>> **Skipped:** [{skipped_track.title}]({skipped_track.uri})\n"
-                f"**Author:** `{skipped_track.author}`\n"
-                f"**Action by:** {interaction.user.mention}"
-            ),
+            description=f">>> **Skipped:** [{skipped_track.title}]({skipped_track.uri})\n**Action by:** {interaction.user.mention}",
             color=ANKUSH_COLOR
         )
-        if next_track:
-            embed.add_field(name=f"{E_PLAY} Up Next", value=f"**[{next_track.title}]({next_track.uri})** (`{format_ms(next_track.length)}`)", inline=False)
-        if skipped_track.thumbnail:
-            embed.set_thumbnail(url=skipped_track.thumbnail)
-        embed.set_footer(text="Developed by Bunny")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @discord.ui.button(label="Stop", style=discord.ButtonStyle.danger, row=0, custom_id="m_btn_stop")
@@ -1742,7 +1899,8 @@ class MusicControlView(discord.ui.View):
         )
         await interaction.response.edit_message(attachments=[], embed=embed, view=None)
 
-    @discord.ui.button(label="Loop", style=discord.ButtonStyle.secondary, row=0, custom_id="m_btn_loop")
+    # ---------------- ROW 1 ----------------
+    @discord.ui.button(label="Loop", style=discord.ButtonStyle.secondary, row=1, custom_id="m_btn_loop")
     async def btn_loop(self, interaction: discord.Interaction, button: discord.ui.Button):
         player = await self.check_user_voice(interaction)
         if not player:
@@ -1750,13 +1908,15 @@ class MusicControlView(discord.ui.View):
 
         if player.loop_mode == "off":
             player.loop_mode = "track"
-            self.update_states()
-            msg = "Track loop enabled."
+            msg = "Track loop enabled (🔂 repeating current song)."
+        elif player.loop_mode == "track":
+            player.loop_mode = "queue"
+            msg = "Queue loop enabled (🔁 repeating whole queue)."
         else:
             player.loop_mode = "off"
-            self.update_states()
-            msg = "Loop disabled."
+            msg = "Loop disabled (songs play once)."
 
+        self.update_states()
         await self.cog.update_nowplaying_card(interaction.channel_id, interaction.message.id, player)
         await interaction.response.send_message(embed=discord.Embed(description=f">>> {E_TICK} **{msg}**", color=discord.Color.green()), ephemeral=True)
 
@@ -1770,13 +1930,53 @@ class MusicControlView(discord.ui.View):
             return await interaction.response.send_message(embed=discord.Embed(description=f"{E_ALERT} Need at least 2 songs in queue to shuffle!", color=ANKUSH_COLOR), ephemeral=True)
 
         random.shuffle(player.queue)
+        await self.cog.update_nowplaying_card(interaction.channel_id, interaction.message.id, player)
         res_embed = discord.Embed(
             title=f"{E_SHUFFLE} Queue Shuffled",
             description=f">>> {E_TICK} **Successfully randomized `{len(player.queue)}` songs in queue.**",
             color=ANKUSH_COLOR
         )
-        res_embed.set_footer(text="Developed by Bunny")
         await interaction.response.send_message(embed=res_embed, ephemeral=True)
+
+    @discord.ui.button(label="Queue (0)", style=discord.ButtonStyle.secondary, row=1, custom_id="m_btn_queue")
+    async def btn_queue(self, interaction: discord.Interaction, button: discord.ui.Button):
+        player = await self.check_user_voice(interaction)
+        if not player:
+            return
+
+        if not player.queue:
+            return await interaction.response.send_message(embed=discord.Embed(description=f"{E_ALERT} Queue is empty. Use `{os.getenv('DEFAULT_PREFIX', '!')}play <song>` to add more songs!", color=ANKUSH_COLOR), ephemeral=True)
+
+        q_list = "\n".join([f"`{i+1}.` **[{t.title}]({t.uri})** (`{format_ms(t.length)}`)" for i, t in enumerate(player.queue[:5])])
+        extra = f"\n*...and `{len(player.queue) - 5}` more tracks.*" if len(player.queue) > 5 else ""
+        embed = discord.Embed(
+            title=f"{E_MUSIC} Up Next in Queue ({len(player.queue)} songs)",
+            description=f">>> {q_list}{extra}",
+            color=discord.Color.from_rgb(43, 45, 49)
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="Vol: 100%", style=discord.ButtonStyle.secondary, row=1, custom_id="m_btn_volup")
+    async def btn_vol(self, interaction: discord.Interaction, button: discord.ui.Button):
+        player = await self.check_user_voice(interaction)
+        if not player:
+            return
+
+        steps = [40, 60, 80, 100]
+        current_vol = player.volume
+        next_vol = 100
+        for s in steps:
+            if s > current_vol:
+                next_vol = s
+                break
+        else:
+            next_vol = 40
+
+        player.set_volume(next_vol)
+        self.update_states()
+        await self.cog.update_nowplaying_card(interaction.channel_id, interaction.message.id, player)
+        await interaction.response.send_message(embed=discord.Embed(description=f"{E_VOLUME} Volume set to **{next_vol}%**", color=discord.Color.green()), ephemeral=True)
+
 
 
 # -------------------- INTERACTIVE SEARCH VIEWS --------------------
@@ -1899,11 +2099,10 @@ class TrackSearchSelect(discord.ui.Select):
         voice_channel = interaction.user.voice.channel
 
         if not self.guild.voice_client:
-            try:
-                player.voice_client = await voice_channel.connect(timeout=15.0, reconnect=True)
-            except Exception as e:
+            player.voice_client = await self.cog.connect_voice_channel(voice_channel, timeout=15.0)
+            if not player.voice_client:
                 return await interaction.response.send_message(
-                    f"{E_ALERT} Failed to join voice channel: `{e}`",
+                    f"{E_ALERT} Failed to join voice channel.",
                     ephemeral=True
                 )
         else:
@@ -2661,7 +2860,15 @@ class BotStatsView(discord.ui.View):
         await interaction.response.edit_message(embed=embed, view=self)
 
 
-# -------------------- REAL-TIME VOICE COMMAND SINK --------------------
+# -------------------- REAL-TIME VOICE COMMAND SINK (24/7 ULTRA-SENSITIVE) --------------------
+
+try:
+    if FFMPEG_EXECUTABLE:
+        AudioSegment.converter = FFMPEG_EXECUTABLE
+        import pydub.utils
+        pydub.utils.which = lambda x: FFMPEG_EXECUTABLE
+except Exception:
+    pass
 
 class VoiceCommandSink(voice_recv.AudioSink):
     """
@@ -2676,9 +2883,9 @@ class VoiceCommandSink(voice_recv.AudioSink):
         self.guild = guild
         self._vc_ref = voice_client
         self.recognizer = sr.Recognizer()
-        self.recognizer.energy_threshold = 60
+        self.recognizer.energy_threshold = 150
         self.recognizer.dynamic_energy_threshold = True
-        self.recognizer.pause_threshold = 0.4
+        self.recognizer.pause_threshold = 0.8
         self.user_buffers: Dict[int, bytearray] = {}
         self.last_spoken: Dict[int, float] = {}
         self.last_speech_time: Dict[int, float] = {}
@@ -2702,7 +2909,7 @@ class VoiceCommandSink(voice_recv.AudioSink):
         # Resolve user if None
         if not user:
             vc = self.voice_client or self._vc_ref or self.guild.voice_client
-            ssrc = getattr(data.packet, 'ssrc', None)
+            ssrc = getattr(data.packet, 'ssrc', None) if hasattr(data, 'packet') else None
             if ssrc and vc and hasattr(vc, '_get_id_from_ssrc'):
                 uid = vc._get_id_from_ssrc(ssrc)
                 if uid:
@@ -2724,7 +2931,7 @@ class VoiceCommandSink(voice_recv.AudioSink):
         if not is_whitelisted_voice_user(user, self.guild):
             return
 
-        # Calculate energy for VAD (Voice Activity Detection) - Lowered to 60 for soft/whisper voice support
+        # Calculate energy for VAD (Voice Activity Detection)
         rms = 0
         try:
             import audioop
@@ -2745,16 +2952,16 @@ class VoiceCommandSink(voice_recv.AudioSink):
                 self.user_buffers[uid] = bytearray()
 
             # If voice packet contains speech or buffer has started
-            if rms >= 60 or len(self.user_buffers[uid]) > 0:
+            if rms >= 100 or len(self.user_buffers[uid]) > 0:
                 self.user_buffers[uid].extend(pcm_bytes)
-                if rms >= 60:
+                if rms >= 100:
                     self.last_speech_time[uid] = now
                 self.last_spoken[uid] = now
 
     async def _silence_checker(self):
         while not self.cog.bot.is_closed():
             try:
-                await asyncio.sleep(0.12)
+                await asyncio.sleep(0.15)
                 now = time.time()
                 to_process = []
                 with self._lock:
@@ -2763,12 +2970,12 @@ class VoiceCommandSink(voice_recv.AudioSink):
                         if not buf:
                             continue
                         last_voice = self.last_speech_time.get(uid, last_time)
-                        # Process if silence of 0.40s after speech OR if utterance reaches max 4.0s
-                        is_silent_after_speech = (now - last_voice >= 0.40)
-                        is_max_length = (len(buf) >= 48000 * 2 * 2 * 4.0)
+                        # Process if silence of 0.80s after speech OR if utterance reaches max 5.0s
+                        is_silent_after_speech = (now - last_voice >= 0.80)
+                        is_max_length = (len(buf) >= 48000 * 2 * 2 * 5.0)
 
                         if (is_silent_after_speech or is_max_length) and not self.is_processing.get(uid, False):
-                            if len(buf) >= 48000 * 2 * 2 * 0.15:  # At least 0.15s
+                            if len(buf) >= 48000 * 2 * 2 * 0.60:  # At least 0.60s of audio
                                 audio_copy = bytes(buf)
                                 self.user_buffers[uid] = bytearray()
                                 self.is_processing[uid] = True
@@ -2802,13 +3009,6 @@ class VoiceCommandSink(voice_recv.AudioSink):
                         channels=2
                     ).set_channels(1).set_frame_rate(16000)
 
-                    # Dynamic gain normalization so even soft/whispered voices are recognized
-                    try:
-                        from pydub.effects import normalize
-                        seg = normalize(seg)
-                    except Exception:
-                        pass
-
                     wav_buf = io.BytesIO()
                     seg.export(wav_buf, format="wav")
                     wav_buf.seek(0)
@@ -2816,14 +3016,15 @@ class VoiceCommandSink(voice_recv.AudioSink):
                     with sr.AudioFile(wav_buf) as source:
                         audio = self.recognizer.record(source)
 
-                    # Try en-IN first (gives Latin script for Hinglish like "nayumi play barsaat", "oye play barsaat")
-                    # Then en-US, then hi-IN as Devanagari fallback
-                    for lang in ["en-IN", "en-US", "hi-IN"]:
+                    for lang in ["en-IN", "hi-IN", "en-US"]:
                         try:
                             res = self.recognizer.recognize_google(audio, language=lang)
                             if res and res.strip():
                                 return res.strip()
-                        except Exception:
+                        except sr.UnknownValueError:
+                            continue
+                        except Exception as req_err:
+                            print(f"[STT Error] {lang}: {req_err}", flush=True)
                             continue
                     return None
                 except Exception as ex:
@@ -2889,8 +3090,67 @@ class MusicCog(commands.Cog, name="Music"):
                 except Exception:
                     pass
 
+    async def connect_voice_channel(self, channel: discord.VoiceChannel, timeout: float = 20.0) -> Optional[discord.VoiceClient]:
+        """
+        Connects to a voice channel using VoiceRecvClient for simultaneous high-fidelity audio playback
+        and real-time voice command receiving.
+        """
+        player = self.get_player(channel.guild)
+        vc = None
+        cls = getattr(voice_recv, 'VoiceRecvClient', None)
+        try:
+            if cls:
+                vc = await channel.connect(timeout=timeout, reconnect=True, cls=cls)
+            else:
+                vc = await channel.connect(timeout=timeout, reconnect=True)
+        except Exception as e:
+            print(f"[CONNECT VOICE RECV EXCEPTION] {channel.name}: {e}, retrying default connect...", flush=True)
+            try:
+                vc = await channel.connect(timeout=timeout, reconnect=True)
+            except Exception as f_ex:
+                print(f"[CONNECT VOICE FALLBACK ERROR] {channel.name}: {f_ex}", flush=True)
+                return None
+
+        if vc:
+            player.voice_client = vc
+            # Attach VoiceCommandSink if supported
+            if hasattr(vc, "listen") and hasattr(vc, "is_listening"):
+                try:
+                    if not vc.is_listening():
+                        sink = VoiceCommandSink(self, channel.guild, vc)
+                        vc.listen(sink)
+                        player.voice_sink = sink
+                        print(f"[VOICE LISTENER] ✅ Attached VoiceCommandSink to '{channel.name}' in '{channel.guild.name}'.", flush=True)
+                except Exception as l_ex:
+                    print(f"[VOICE LISTENER ATTACH ERROR] {l_ex}", flush=True)
+        return vc
+
     async def voice_listener_watchdog(self):
-        pass
+        await self.bot.wait_until_ready()
+        print("[Voice Listener Watchdog] ✅ Started 24/7 voice recognition watchdog (3s heartbeat).", flush=True)
+        while not self.bot.is_closed():
+            try:
+                for guild in self.bot.guilds:
+                    vc = guild.voice_client
+                    if vc and is_vc_connected(vc) and hasattr(vc, "listen") and hasattr(vc, "is_listening"):
+                        player = self.get_player(guild)
+                        if not vc.is_listening():
+                            try:
+                                sink = VoiceCommandSink(self, guild, vc)
+                                vc.listen(sink)
+                                player.voice_sink = sink
+                                print(f"[WATCHDOG] 🔄 Re-attached VoiceCommandSink to '{vc.channel.name}' in '{guild.name}'.", flush=True)
+                            except Exception as e:
+                                print(f"[WATCHDOG ATTACH ERROR] {e}", flush=True)
+                        else:
+                            # Verify sink task is alive
+                            sink = getattr(player, 'voice_sink', None)
+                            if sink and isinstance(sink, VoiceCommandSink):
+                                if not sink._check_task or sink._check_task.done():
+                                    sink._check_task = self.bot.loop.create_task(sink._silence_checker())
+            except Exception:
+                pass
+            await asyncio.sleep(3)
 
 
 
@@ -2933,6 +3193,51 @@ class MusicCog(commands.Cog, name="Music"):
                     if ch.permissions_for(guild.me).send_messages:
                         channel = ch
                         break
+
+            # 0. Standby / Sleep & Wakeup Voice Commands (Owner, Admins, AI Whitelisted Users)
+            is_whitelisted_ai = is_ai_whitelisted_user(member.id)
+            sleep_triggers = [
+                r"\b(sleep|standby|shutdown|shut\s*down|so\s*jao|so\s*ja|chup\s*ho\s*jao|off\s*ho\s*jao|band\s*ho\s*jao|offline\s*jao|power\s*off)\b",
+                r"\b(सो\s*जाओ|सो\s*जा|ऑफ\s*हो\s*जाओ|बंद\s*हो\s*जाओ|स्लीप)\b"
+            ]
+            wake_triggers = [
+                r"\b(wake\s*up|wakeup|uth\s*jao|jaag\s*jao|on\s*ho\s*jao|chalu\s*ho\s*jao|online\s*aao|activate|power\s*on)\b",
+                r"\b(उठ\s*जाओ|जाग\s*जाओ|ऑन\s*हो\s*जाओ|चालू\s*हो\s*जाओ|वेक\s*अप)\b"
+            ]
+
+            if any(re.search(p, cmd_part) for p in sleep_triggers) and not any(w in cmd_part for w in ["wake", "uth", "jaag", "on"]):
+                if is_whitelisted_ai:
+                    set_standby_state(True, channel.id if channel else 0)
+                    if channel and hasattr(channel, 'send'):
+                        await channel.send(embed=discord.Embed(
+                            description=f"💤 **Nayumi:** Sleep / Standby mode activated by {member.mention}! Bye bye! 🌙✨",
+                            color=ANKUSH_COLOR
+                        ))
+                    return
+                else:
+                    if channel and hasattr(channel, 'send'):
+                        await channel.send(embed=discord.Embed(
+                            description=f"❌ Only Bot Owners, Admins, aur **AI Whitelisted Users** Nayumi ko sleep/standby mode me daal sakte hain!",
+                            color=discord.Color.red()
+                        ))
+                    return
+
+            if any(re.search(p, cmd_part) for p in wake_triggers):
+                if is_whitelisted_ai:
+                    set_standby_state(False)
+                    if channel and hasattr(channel, 'send'):
+                        await channel.send(embed=discord.Embed(
+                            description=f"⚡ **Nayumi:** Aankh khul gayi {member.mention}! Main wapas online aa gayi hoon! 🎀✨",
+                            color=ANKUSH_COLOR
+                        ))
+                    return
+                else:
+                    if channel and hasattr(channel, 'send'):
+                        await channel.send(embed=discord.Embed(
+                            description=f"❌ Only Bot Owners, Admins, aur **AI Whitelisted Users** Nayumi ko wake up kar sakte hain!",
+                            color=discord.Color.red()
+                        ))
+                    return
 
             # 1. Autoplay Enable / Disable / Toggle Command
             autoplay_patterns = [
@@ -3066,6 +3371,27 @@ class MusicCog(commands.Cog, name="Music"):
                     await channel.send(embed=discord.Embed(description=f"{E_SKIP} **Voice Command:** Skipped track by {member.mention}!", color=ANKUSH_COLOR))
                 return
 
+            # 6b. Previous / Pichla Gaana
+            prev_patterns = [
+                r"\b(previous|prev|back|pichla|pehle\s+wala|purana|peeche)\b",
+                r"\b(pichla\s+gaana|pichla\s+song|pehle\s+ka\s+gaana|wapas\s+pichla)\b",
+                r"\b(प्रीवियस|पिछला|पिछला\s+गाना|पहले\s+वाला)\b"
+            ]
+            if any(re.search(p, cmd_part) for p in prev_patterns) or cmd_part in ["prev", "previous", "back", "pichla", "pichla gana"]:
+                print(f"[HANDLE VOICE] Executing PREVIOUS command", flush=True)
+                if player.history:
+                    prev_track = player.history.pop()
+                    if player.current:
+                        player.queue.insert(0, player.current)
+                    await player.play_track(prev_track)
+                    if channel and hasattr(channel, 'send'):
+                        await channel.send(embed=discord.Embed(description=f"{E_PREV} **Voice Command:** Playing previous track **[{prev_track.title}]({prev_track.uri})** by {member.mention}!", color=ANKUSH_COLOR))
+                elif player.current:
+                    await player.play_track(player.current)
+                    if channel and hasattr(channel, 'send'):
+                        await channel.send(embed=discord.Embed(description=f"{E_PREV} **Voice Command:** Replaying **[{player.current.title}]({player.current.uri})** by {member.mention}!", color=ANKUSH_COLOR))
+                return
+
             # 7. Volume
             vol_patterns = [
                 r"\b(volume|vol|awaz|awaaz|sound|volume\s+set|awaaz\s+set)\b",
@@ -3122,8 +3448,8 @@ class MusicCog(commands.Cog, name="Music"):
             # 9. Play Command (Prefix, Suffix, or Explicit Song Name)
             query = None
             play_prefixes = [
-                r"^(play\s+song|play\s+music|play|chalao|chala\s+do|chala\s+de|chala\s+dijiye|lagao|laga\s+do|laga\s+de|laga\s+dijiye|bajao|baja\s+do|baja\s+de|baja\s+dijiye|suno|sunao|suna\s+do|suna\s+de|suna\s+dijiye|chalo)\s+",
-                r"^(प्ले|चलाओ|चला\s+दो|चला\s+दे|लगाओ|लगा\s+दो|लगा\s+दे|बजाओ|बजा\s+दो|बजा\s+दे|सुनो|सुनाओ|सुना\s+दो|सुना\s+दे|चलो)\s+"
+                r"^(play\s+song|play\s+music|play|chalao|chala\s+do|chala\s+de|chala\s+dijiye|chala|lagao|laga\s+do|laga\s+de|laga\s+dijiye|laga|bajao|baja\s+do|baja\s+de|baja\s+dijiye|baja|suno|sunao|suna\s+do|suna\s+de|suna\s+dijiye|chalo)\s+",
+                r"^(प्ले|चलाओ|चला\s+दो|चला\s+दे|चला|लगाओ|लगा\s+दो|लगा\s+दे|लगा|बजाओ|बजा\s+दो|बजा\s+दे|बजा|सुनो|सुनाओ|सुना\s+दो|सुना\s+दे|चलो)\s+"
             ]
             for p in play_prefixes:
                 m = re.search(p, cmd_part)
@@ -3133,8 +3459,8 @@ class MusicCog(commands.Cog, name="Music"):
 
             if not query:
                 play_suffixes = [
-                    r"\s+(chalao|chala\s+do|chala\s+de|chala\s+dijiye|lagao|laga\s+do|laga\s+de|laga\s+dijiye|bajao|baja\s+do|baja\s+de|baja\s+dijiye|sunao|suna\s+do|suna\s+de|suna\s+dijiye|chalo|play\s+karo|play)$",
-                    r"\s+(चलाओ|चला\s+दो|चला\s+दे|लगाओ|लगा\s+दो|लगा\s+दे|बजाओ|बजा\s+दो|बजा\s+दे|सुनाओ|सुना\s+दो|सुना\s+दे|चलो)$"
+                    r"\s+(chalao|chala\s+do|chala\s+de|chala\s+dijiye|chala|lagao|laga\s+do|laga\s+de|laga\s+dijiye|laga|bajao|baja\s+do|baja\s+de|baja\s+dijiye|baja|sunao|suna\s+do|suna\s+de|suna\s+dijiye|chalo|play\s+karo|play)$",
+                    r"\s+(चलाओ|चला\s+दो|चला\s+दे|चला|लगाओ|लगा\s+दो|लगा\s+दे|लगा|बजाओ|बजा\s+दो|बजा\s+दे|बजा|सुनाओ|सुना\s+दो|सुना\s+दे|चलो)$"
                 ]
                 for s in play_suffixes:
                     m = re.search(s, cmd_part)
@@ -3143,6 +3469,11 @@ class MusicCog(commands.Cog, name="Music"):
                         if candidate and candidate not in ["wapas", "wapis", "phir se", "dobara", "gana", "song", "ek"]:
                             query = candidate
                             break
+
+            if not query and (has_wake or cmd_part.endswith("song") or cmd_part.endswith("gaana") or cmd_part.endswith("gana")):
+                cleaned_cand = re.sub(r"\s+(song|gaana|gana|track)$", "", cmd_part).strip()
+                if cleaned_cand and len(cleaned_cand) >= 2 and cleaned_cand not in ["wapas", "wapis", "pause", "resume", "skip", "stop", "leave", "help"]:
+                    query = cleaned_cand
 
             # If user explicitly asked to play something
             if query:
@@ -3167,7 +3498,7 @@ class MusicCog(commands.Cog, name="Music"):
                         if member.voice and member.voice.channel:
                             player.is_connecting = True
                             try:
-                                player.voice_client = await member.voice.channel.connect(timeout=15.0, reconnect=True)
+                                player.voice_client = await self.connect_voice_channel(member.voice.channel, timeout=15.0)
                                 vc = player.voice_client
                             except Exception as e:
                                 print(f"[Voice Auto-Connect Error] {e}", flush=True)
@@ -3235,7 +3566,7 @@ class MusicCog(commands.Cog, name="Music"):
                             except Exception:
                                 pass
                             await asyncio.sleep(0.5)
-                        player.voice_client = await channel.connect(timeout=20.0, reconnect=True)
+                        player.voice_client = await self.connect_voice_channel(channel, timeout=20.0)
                         if text_id:
                             player.home_channel = guild.get_channel(text_id)
                         player.cancel_idle_timer()
@@ -3269,7 +3600,7 @@ class MusicCog(commands.Cog, name="Music"):
                         except Exception:
                             pass
                         await asyncio.sleep(0.5)
-                    player.voice_client = await channel.connect(timeout=20.0, reconnect=True)
+                    player.voice_client = await self.connect_voice_channel(channel, timeout=20.0)
                     if text_id:
                         player.home_channel = guild.get_channel(text_id)
                     print(f"[24/7 Reconnect] Connected to '{channel.name}' in '{guild.name}'.")
@@ -3307,13 +3638,15 @@ class MusicCog(commands.Cog, name="Music"):
 
         clean_title = clean_track_title(track.title)
         clean_author = track.author or "Unknown Artist"
-        duration_str = format_ms(track.length)
-        loop_status = "Track" if player.loop_mode == "track" else ("Queue" if player.loop_mode == "queue" else "Off")
-        req_name = track.requester.display_name if track.requester else "User"
+        duration_str = format_ms(track.length) if track.length else "00:00"
+        loop_status = "Off" if player.loop_mode == "off" else ("Track" if player.loop_mode == "track" else "Queue")
+        req_name = track.requester.name if track.requester else "User"
+
+        title_md = f"[{clean_title}]({track.uri})" if (track.uri and track.uri.startswith("http")) else clean_title
 
         text_content = (
-            f"### {E_RECORDSPIN} **NOW STREAMING**\n"
-            f"## [{clean_title}]({track.uri})\n"
+            f"### {E_PEACHGOMA} **NOW STREAMING**\n"
+            f"## {title_md}\n"
             f"> **Artist:** {clean_author}\n"
             f"> **Length:** {duration_str}\n"
             f"> **Mode:** Loop: {loop_status}\n"
@@ -3338,8 +3671,6 @@ class MusicCog(commands.Cog, name="Music"):
             }
 
         pause_label = "Resume" if player.is_paused else "Pause"
-        pause_style = 3 if player.is_paused else 2  # 3 = Success (Green), 2 = Secondary (Grey)
-        loop_style = 3 if player.loop_mode != "off" else 2
 
         container_components = [
             section_comp,
@@ -3351,7 +3682,7 @@ class MusicCog(commands.Cog, name="Music"):
                 "components": [
                     {
                         "type": 2,
-                        "style": pause_style,
+                        "style": 2,  # Secondary (Grey)
                         "label": pause_label,
                         "custom_id": "m_btn_pause"
                     },
@@ -3380,7 +3711,7 @@ class MusicCog(commands.Cog, name="Music"):
                 "components": [
                     {
                         "type": 2,
-                        "style": loop_style,
+                        "style": 2,
                         "label": "Loop",
                         "custom_id": "m_btn_loop"
                     },
@@ -3420,77 +3751,43 @@ class MusicCog(commands.Cog, name="Music"):
     async def send_nowplaying_card(self, channel: discord.TextChannel, player: GuildPlayer) -> discord.Message:
         track = player.current
         if not track:
-            embed = discord.Embed(description="No music is currently playing in this server.", color=ANKUSH_COLOR)
+            embed = discord.Embed(description="No music is currently playing in this server.", color=discord.Color.from_rgb(88, 101, 242))
             return await channel.send(embed=embed)
 
-        view = MusicControlView(self, channel.guild.id)
+        payload = self.make_nowplaying_v2_payload(player)
         try:
-            loop = asyncio.get_event_loop()
-            curr_pos = int(time.time() - player.start_time) * 1000 if player.start_time else 0
-            buf = await loop.run_in_executor(
-                None,
-                create_music_card,
-                track.title,
-                track.author or "",
-                curr_pos,
-                track.length,
-                track.thumbnail,
-                track.requester.display_name if track.requester else "User",
-                player.loop_mode,
-                player.volume,
-                player.is_paused
-            )
-            if buf:
-                buf.seek(0)
-                file = discord.File(buf, filename="card.png")
-                msg = await channel.send(file=file, view=view)
-                player.last_np_msg = msg
-                return msg
-        except Exception as card_err:
-            print(f"[send_nowplaying_card] Image card error: {card_err}", flush=True)
-
-        # Fallback: send text embed only if card generation fails
-        embed = self.make_nowplaying_embed(player)
-        msg = await channel.send(embed=embed, view=view)
-        player.last_np_msg = msg
-        return msg
+            route = Route('POST', f'/channels/{channel.id}/messages')
+            msg_data = await self.bot.http.request(route, json=payload)
+            msg = discord.Message(state=self.bot._connection, channel=channel, data=msg_data)
+            player.last_np_msg = msg
+            return msg
+        except Exception as e:
+            print(f"[send_nowplaying_card V2 error] {e}", flush=True)
+            view = MusicControlView(self, channel.guild.id)
+            embed = self.make_nowplaying_embed(player)
+            msg = await channel.send(embed=embed, view=view)
+            player.last_np_msg = msg
+            return msg
 
     async def update_nowplaying_card(self, channel_id: int, message_id: int, player: GuildPlayer):
         track = player.current
         if not track:
             return
-        channel = self.bot.get_channel(channel_id)
-        if not channel:
-            return
+        payload = self.make_nowplaying_v2_payload(player)
         try:
-            msg = await channel.fetch_message(message_id)
-            view = MusicControlView(self, channel.guild.id)
-            # Regenerate the PNG card image for the update
-            loop = asyncio.get_event_loop()
-            curr_pos = int(time.time() - player.start_time) * 1000 if player.start_time else 0
-            buf = await loop.run_in_executor(
-                None,
-                create_music_card,
-                track.title,
-                track.author or "",
-                curr_pos,
-                track.length,
-                track.thumbnail,
-                track.requester.display_name if track.requester else "User",
-                player.loop_mode,
-                player.volume,
-                player.is_paused
-            )
-            if buf:
-                buf.seek(0)
-                file = discord.File(buf, filename="card.png")
-                await msg.edit(attachments=[file], view=view)
-            else:
-                # Fallback to embed if card fails
-                embed = self.make_nowplaying_embed(player)
-                await msg.edit(embed=embed, view=view)
+            route = Route('PATCH', f'/channels/{channel_id}/messages/{message_id}')
+            await self.bot.http.request(route, json=payload)
         except Exception as e:
-            print(f"[update_nowplaying_card] error: {e}", flush=True)
+            print(f"[update_nowplaying_card V2 error] {e}", flush=True)
+            channel = self.bot.get_channel(channel_id)
+            if channel:
+                try:
+                    msg = await channel.fetch_message(message_id)
+                    view = MusicControlView(self, channel.guild.id)
+                    embed = self.make_nowplaying_embed(player)
+                    await msg.edit(embed=embed, view=view)
+                except Exception:
+                    pass
 
     @commands.Cog.listener()
     async def on_interaction(self, interaction: discord.Interaction):
@@ -3522,34 +3819,42 @@ class MusicCog(commands.Cog, name="Music"):
                 player.is_paused = False
                 player.start_time += (time.time() - player.pause_time)
                 await self.update_nowplaying_card(interaction.channel_id, interaction.message.id, player)
-                await interaction.response.send_message(embed=discord.Embed(description=f"{E_PLAY} **Playback Resumed**", color=discord.Color.green()), ephemeral=True)
+                if not interaction.response.is_done():
+                    await interaction.response.send_message(embed=discord.Embed(description=f"{E_PLAY} **Playback Resumed**", color=discord.Color.green()), ephemeral=True)
             else:
                 player.voice_client.pause()
                 player.is_paused = True
                 player.pause_time = time.time()
                 await self.update_nowplaying_card(interaction.channel_id, interaction.message.id, player)
-                await interaction.response.send_message(embed=discord.Embed(description=f"{E_PAUSE} **Playback Paused**", color=ANKUSH_COLOR), ephemeral=True)
+                if not interaction.response.is_done():
+                    await interaction.response.send_message(embed=discord.Embed(description=f"{E_PAUSE} **Playback Paused**", color=ANKUSH_COLOR), ephemeral=True)
 
         elif custom_id == "m_btn_prev":
-            if player.position_ms > 5000 and player.current:
-                await player.play_track(player.current)
-                await interaction.response.send_message(embed=discord.Embed(description=f"{E_PREV} Replaying **[{player.current.title}]({player.current.uri})** from start.", color=discord.Color.green()), ephemeral=True)
-            elif player.history:
+            if player.history:
                 prev_track = player.history.pop()
+                if player.current:
+                    player.queue.insert(0, player.current)
                 await player.play_track(prev_track)
-                await interaction.response.send_message(embed=discord.Embed(description=f"{E_PREV} Playing previous track: **[{prev_track.title}]({prev_track.uri})**", color=discord.Color.green()), ephemeral=True)
+                if not interaction.response.is_done():
+                    await interaction.response.send_message(embed=discord.Embed(description=f"{E_PREV} Playing previous track: **[{prev_track.title}]({prev_track.uri})**", color=discord.Color.green()), ephemeral=True)
+            elif player.current:
+                await player.play_track(player.current)
+                if not interaction.response.is_done():
+                    await interaction.response.send_message(embed=discord.Embed(description=f"{E_PREV} No previous track in history. Replaying **[{player.current.title}]({player.current.uri})** from start.", color=discord.Color.green()), ephemeral=True)
             else:
-                await interaction.response.send_message(embed=discord.Embed(description=f"{E_ALERT} No previous track in history!", color=ANKUSH_COLOR), ephemeral=True)
+                if not interaction.response.is_done():
+                    await interaction.response.send_message(embed=discord.Embed(description=f"{E_ALERT} No previous track in history!", color=ANKUSH_COLOR), ephemeral=True)
 
         elif custom_id == "m_btn_skip":
             skipped_track = player.current
             player.voice_client.stop()
-            embed = discord.Embed(
-                title=f"{E_SKIP} Track Skipped",
-                description=f">>> **Skipped:** [{skipped_track.title}]({skipped_track.uri})\n**Action by:** {interaction.user.mention}",
-                color=ANKUSH_COLOR
-            )
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+            if not interaction.response.is_done():
+                embed = discord.Embed(
+                    title=f"{E_SKIP} Track Skipped",
+                    description=f">>> **Skipped:** [{skipped_track.title}]({skipped_track.uri})\n**Action by:** {interaction.user.mention}",
+                    color=ANKUSH_COLOR
+                )
+                await interaction.response.send_message(embed=embed, ephemeral=True)
 
         elif custom_id == "m_btn_stop":
             player.queue.clear()
@@ -3558,14 +3863,30 @@ class MusicCog(commands.Cog, name="Music"):
             if not is_247(interaction.guild.id):
                 player.start_idle_timer()
             try:
-                embed = discord.Embed(
-                    title=f"{E_STOP} Playback Stopped",
-                    description=f">>> **Music stopped and queue cleared by {interaction.user.mention}.**",
-                    color=ANKUSH_COLOR
-                )
-                await interaction.response.edit_message(attachments=[], embed=embed, view=None)
+                stop_payload = {
+                    "flags": 32768,
+                    "components": [
+                        {
+                            "type": 17,
+                            "accent_color": 0xED4245,
+                            "components": [
+                                {
+                                    "type": 10,
+                                    "content": f"### {E_STOP} **Playback Stopped**\n> Music stopped and queue cleared by {interaction.user.mention}."
+                                }
+                            ]
+                        }
+                    ]
+                }
+                route = Route('PATCH', f'/channels/{interaction.channel_id}/messages/{interaction.message.id}')
+                await self.bot.http.request(route, json=stop_payload)
             except Exception:
-                await interaction.response.defer()
+                pass
+            if not interaction.response.is_done():
+                try:
+                    await interaction.response.defer()
+                except Exception:
+                    pass
 
         elif custom_id == "m_btn_loop":
             if player.loop_mode == "off":
@@ -3578,26 +3899,33 @@ class MusicCog(commands.Cog, name="Music"):
                 player.loop_mode = "off"
                 msg = "Loop disabled (songs play once)."
             await self.update_nowplaying_card(interaction.channel_id, interaction.message.id, player)
-            await interaction.response.send_message(embed=discord.Embed(description=f">>> {E_TICK} **{msg}**", color=discord.Color.green()), ephemeral=True)
+            if not interaction.response.is_done():
+                await interaction.response.send_message(embed=discord.Embed(description=f">>> {E_TICK} **{msg}**", color=discord.Color.green()), ephemeral=True)
 
         elif custom_id == "m_btn_shuffle":
             if len(player.queue) < 2:
-                return await interaction.response.send_message(embed=discord.Embed(description=f"{E_ALERT} Need at least 2 songs in queue to shuffle!", color=ANKUSH_COLOR), ephemeral=True)
-            random.shuffle(player.queue)
-            await self.update_nowplaying_card(interaction.channel_id, interaction.message.id, player)
-            await interaction.response.send_message(embed=discord.Embed(description=f">>> {E_TICK} **Successfully randomized `{len(player.queue)}` songs in queue.**", color=ANKUSH_COLOR), ephemeral=True)
+                if not interaction.response.is_done():
+                    return await interaction.response.send_message(embed=discord.Embed(description=f"{E_ALERT} Need at least 2 songs in queue to shuffle!", color=ANKUSH_COLOR), ephemeral=True)
+            else:
+                random.shuffle(player.queue)
+                await self.update_nowplaying_card(interaction.channel_id, interaction.message.id, player)
+                if not interaction.response.is_done():
+                    await interaction.response.send_message(embed=discord.Embed(description=f">>> {E_TICK} **Successfully randomized `{len(player.queue)}` songs in queue.**", color=ANKUSH_COLOR), ephemeral=True)
 
         elif custom_id == "m_btn_queue":
             if not player.queue:
-                return await interaction.response.send_message(embed=discord.Embed(description=f"{E_ALERT} Queue is empty. Use `{os.getenv('DEFAULT_PREFIX', '!')}play <song>` to add more songs!", color=ANKUSH_COLOR), ephemeral=True)
-            q_list = "\n".join([f"`{i+1}.` **[{t.title}]({t.uri})** (`{format_ms(t.length)}`)" for i, t in enumerate(player.queue[:5])])
-            extra = f"\n*...and `{len(player.queue) - 5}` more tracks.*" if len(player.queue) > 5 else ""
-            embed = discord.Embed(
-                title=f"{E_MUSIC} Up Next in Queue ({len(player.queue)} songs)",
-                description=f">>> {q_list}{extra}",
-                color=discord.Color.from_rgb(43, 45, 49)
-            )
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+                if not interaction.response.is_done():
+                    return await interaction.response.send_message(embed=discord.Embed(description=f"{E_ALERT} Queue is empty. Use `{os.getenv('DEFAULT_PREFIX', '!')}play <song>` to add more songs!", color=ANKUSH_COLOR), ephemeral=True)
+            else:
+                q_list = "\n".join([f"`{i+1}.` **[{t.title}]({t.uri})** (`{format_ms(t.length)}`)" for i, t in enumerate(player.queue[:5])])
+                extra = f"\n*...and `{len(player.queue) - 5}` more tracks.*" if len(player.queue) > 5 else ""
+                embed = discord.Embed(
+                    title=f"{E_MUSIC} Up Next in Queue ({len(player.queue)} songs)",
+                    description=f">>> {q_list}{extra}",
+                    color=discord.Color.from_rgb(43, 45, 49)
+                )
+                if not interaction.response.is_done():
+                    await interaction.response.send_message(embed=embed, ephemeral=True)
 
         elif custom_id == "m_btn_volup":
             steps = [40, 60, 80, 100]
@@ -3611,24 +3939,30 @@ class MusicCog(commands.Cog, name="Music"):
                 next_vol = 40
             player.set_volume(next_vol)
             await self.update_nowplaying_card(interaction.channel_id, interaction.message.id, player)
-            await interaction.response.send_message(embed=discord.Embed(description=f"{E_VOLUME} Volume set to **{next_vol}%**", color=discord.Color.green()), ephemeral=True)
+            if not interaction.response.is_done():
+                await interaction.response.send_message(embed=discord.Embed(description=f"{E_VOLUME} Volume set to **{next_vol}%**", color=discord.Color.green()), ephemeral=True)
 
     def make_nowplaying_embed(self, player: GuildPlayer, use_card: bool = False) -> discord.Embed:
         track = player.current
         if not track:
-            return discord.Embed(description="No music is currently playing in this server.", color=discord.Color.from_rgb(43, 45, 49))
+            return discord.Embed(description="No music is currently playing in this server.", color=discord.Color.from_rgb(88, 101, 242))
 
-        embed = discord.Embed(color=ANKUSH_COLOR)
+        embed = discord.Embed(color=0x5865F2)
         
         clean_title = clean_track_title(track.title)
         clean_author = track.author or "Unknown Artist"
 
-        embed.title = f"🎵 {clean_title}"
-        embed.url = track.uri or ""
-        
+        # NOW STREAMING Header with animated cat icon
+        embed.set_author(name="NOW STREAMING", icon_url="https://cdn.discordapp.com/emojis/1545728910153486366.gif")
+
+        # Blue Song Title
+        embed.title = clean_title
+        if track.uri and track.uri.startswith("http"):
+            embed.url = track.uri
+
         req_name = track.requester.name if track.requester else "User"
-        duration_str = format_ms(track.length)
-        loop_status = player.loop_mode.capitalize()
+        duration_str = format_ms(track.length) if track.length else "00:00"
+        loop_status = "Off" if player.loop_mode == "off" else ("Track" if player.loop_mode == "track" else "Queue")
 
         embed.description = (
             f"> **Artist:** {clean_author}\n"
@@ -3638,9 +3972,8 @@ class MusicCog(commands.Cog, name="Music"):
         )
 
         if track.thumbnail:
-            embed.set_image(url=track.thumbnail)
+            embed.set_thumbnail(url=track.thumbnail)
 
-        embed.set_footer(text="Developed by Bunny • Nayumi Music")
         return embed
 
     async def resolve_spotify_url(self, url: str) -> List[Dict[str, str]]:
@@ -4018,15 +4351,14 @@ class MusicCog(commands.Cog, name="Music"):
                     sc_tr.direct_url_time = time.time()
                     return sc_tr
 
-            return Track(
-                title=o_title or f"YouTube Video ({yt_vid_id})",
-                uri=canonical_yt_url,
-                author=o_author,
-                duration_sec=210,
-                stream_url=canonical_yt_url,
-                requester=requester,
-                thumbnail=o_thumb
-            )
+        # Direct JioSaavn 320kbps CD Lossless Resolver (100% immune to cloud hosting/Nexcloud IP blocks)
+        if not is_url:
+            try:
+                saavn_tr = await self.resolve_saavn_track(search_target, requester)
+                if saavn_tr:
+                    return saavn_tr
+            except Exception as s_err:
+                print(f"[search_track] JioSaavn resolve error: {s_err}", flush=True)
 
         def _extract():
             if is_url:
@@ -4360,10 +4692,9 @@ class MusicCog(commands.Cog, name="Music"):
                 except Exception:
                     pass
                 await asyncio.sleep(0.5)
-            try:
-                player.voice_client = await voice_channel.connect(timeout=15.0, reconnect=True)
-            except Exception as e:
-                embed = discord.Embed(description=f"{E_ALERT} Failed to join voice channel: `{e}`", color=ANKUSH_COLOR)
+            player.voice_client = await self.connect_voice_channel(voice_channel, timeout=15.0)
+            if not player.voice_client:
+                embed = discord.Embed(description=f"{E_ALERT} Failed to join voice channel.", color=ANKUSH_COLOR)
                 await ctx.send(embed=embed)
                 return None
         else:
@@ -4389,13 +4720,60 @@ class MusicCog(commands.Cog, name="Music"):
         # 1. Handle bot's own voice state changes
         if member.id == self.bot.user.id:
             if before.channel and not after.channel:
-                # Bot was disconnected
+                # Bot was disconnected from voice channel
                 player = self.players.get(member.guild.id)
                 if player:
-                    player.voice_client = None
-                    player.current = None
-                    player.queue.clear()
-                    player.cancel_idle_timer()
+                    if getattr(player, 'explicit_disconnect', False):
+                        player.voice_client = None
+                        player.current = None
+                        player.queue.clear()
+                        player.cancel_idle_timer()
+                    else:
+                        # Unexpected network/Discord voice handshake drop -> Auto-recover & resume!
+                        async def _auto_reconnect():
+                            await asyncio.sleep(1.0)
+                            target_channel = before.channel
+                            if is_247(member.guild.id):
+                                row_247 = get_247(member.guild.id)
+                                if row_247:
+                                    ch = member.guild.get_channel(row_247[0])
+                                    if ch and isinstance(ch, discord.VoiceChannel):
+                                        target_channel = ch
+                            if target_channel and (is_247(member.guild.id) or player.current or len(player.queue) > 0):
+                                for attempt in range(5):
+                                    try:
+                                        if member.guild.voice_client:
+                                            try:
+                                                await member.guild.voice_client.disconnect(force=True)
+                                            except Exception:
+                                                pass
+                                            await asyncio.sleep(0.5)
+                                        player.voice_client = await self.connect_voice_channel(target_channel, timeout=20.0)
+                                        if player.voice_client:
+                                            print(f"[Voice Auto-Recovery] ✅ Reconnected to '{target_channel.name}' in '{member.guild.name}'.", flush=True)
+                                            player.cancel_idle_timer()
+                                            if player.current and not player.is_playing:
+                                                curr_track = player.current
+                                                pos_ms = player.position_ms
+                                                await player.play_track(curr_track, seek_ms=pos_ms)
+                                            break
+                                    except Exception as rec_err:
+                                        print(f"[Voice Auto-Recovery Attempt {attempt+1}] {rec_err}", flush=True)
+                                        await asyncio.sleep(2.0)
+                        asyncio.create_task(_auto_reconnect())
+            elif after.channel and before.channel != after.channel:
+                # Bot moved to another voice channel -> ensure listener is attached immediately
+                bot_vc = member.guild.voice_client
+                if bot_vc and hasattr(bot_vc, "listen") and hasattr(bot_vc, "is_listening"):
+                    if not bot_vc.is_listening():
+                        try:
+                            player = self.get_player(member.guild)
+                            sink = VoiceCommandSink(self, member.guild, bot_vc)
+                            bot_vc.listen(sink)
+                            player.voice_sink = sink
+                            print(f"[Voice Move] ✅ Attached VoiceCommandSink to new channel '{after.channel.name}' in '{member.guild.name}'.", flush=True)
+                        except Exception:
+                            pass
             return
 
         # 2. Handle member departures from bot's channel
@@ -4552,14 +4930,9 @@ class MusicCog(commands.Cog, name="Music"):
             embed.set_footer(text="Developed by Bunny • Nayumi Music")
             return await loading_msg.edit(embed=embed)
 
-        loading_msg = await ctx.send(embed=discord.Embed(
-            description=f"🔍 Searching and loading **{query[:80]}**...",
-            color=discord.Color.from_rgb(255, 255, 255)
-        ))
         track = await self.search_track(query, ctx.author)
-
         if not track:
-            return await loading_msg.edit(embed=discord.Embed(description=f"{E_ALERT} No playable results found for `{query}`.", color=ANKUSH_COLOR))
+            return await ctx.send(embed=discord.Embed(description=f"{E_ALERT} No playable results found for `{query}`.", color=ANKUSH_COLOR))
 
         is_actually_playing = False
         if player.voice_client:
@@ -4571,17 +4944,22 @@ class MusicCog(commands.Cog, name="Music"):
         if is_actually_playing:
             player.queue.append(track)
             player.prefetched_autoplay = None
-            embed = discord.Embed(
-                description=f"Added [{track.title}]({track.uri}) to the queue. (`#{len(player.queue)}` in queue)",
-                color=discord.Color.from_rgb(255, 255, 255)
+            clean_title = clean_track_title(track.title)
+            embed = discord.Embed(color=0x5865F2)
+            embed.set_author(name="ADDED TO QUEUE", icon_url="https://cdn.discordapp.com/emojis/1545728910153486366.gif")
+            embed.title = clean_title
+            if track.uri and track.uri.startswith("http"):
+                embed.url = track.uri
+            embed.description = (
+                f"> **Artist:** {track.author or 'Unknown Artist'}\n"
+                f"> **Length:** {format_ms(track.length)}\n"
+                f"> **Position:** `#{len(player.queue)}` in queue\n"
+                f"> **Requested by:** {ctx.author.name}"
             )
-            embed.set_footer(text="Developed by Bunny")
-            await loading_msg.edit(embed=embed)
+            if track.thumbnail:
+                embed.set_thumbnail(url=track.thumbnail)
+            await ctx.send(embed=embed)
         else:
-            try:
-                await loading_msg.delete()
-            except Exception:
-                pass
             await player.play_track(track)
 
     @commands.command(name="pause")
@@ -4720,23 +5098,10 @@ class MusicCog(commands.Cog, name="Music"):
             embed.set_footer(text="Developed by Bunny")
             return await ctx.send(embed=embed)
 
-        if player.position_ms > 5000 and player.current:
-            await player.play_track(player.current)
-            embed = discord.Embed(
-                title=f"{E_PREV} Replaying Track",
-                description=(
-                    f">>> {E_TICK} Replaying **[{player.current.title}]({player.current.uri})** from the beginning.\n\n"
-                    f"{E_USER} **Action by:** {ctx.author.mention}"
-                ),
-                color=ANKUSH_COLOR
-            )
-            if player.current.thumbnail:
-                embed.set_thumbnail(url=player.current.thumbnail)
-            embed.set_footer(text="Developed by Bunny")
-            return await ctx.send(embed=embed)
-
         if player.history:
             prev_track = player.history.pop()
+            if player.current:
+                player.queue.insert(0, player.current)
             await player.play_track(prev_track)
             embed = discord.Embed(
                 title=f"{E_PREV} Playing Previous Track",
@@ -4750,6 +5115,20 @@ class MusicCog(commands.Cog, name="Music"):
             )
             if prev_track.thumbnail:
                 embed.set_thumbnail(url=prev_track.thumbnail)
+            embed.set_footer(text="Developed by Bunny")
+            await ctx.send(embed=embed)
+        elif player.current:
+            await player.play_track(player.current)
+            embed = discord.Embed(
+                title=f"{E_PREV} Replaying Track",
+                description=(
+                    f">>> {E_TICK} No previous track in history. Replaying **[{player.current.title}]({player.current.uri})** from start.\n\n"
+                    f"{E_USER} **Action by:** {ctx.author.mention}"
+                ),
+                color=ANKUSH_COLOR
+            )
+            if player.current.thumbnail:
+                embed.set_thumbnail(url=player.current.thumbnail)
             embed.set_footer(text="Developed by Bunny")
             await ctx.send(embed=embed)
         else:
@@ -5248,11 +5627,16 @@ class MusicCog(commands.Cog, name="Music"):
     @commands.command(name="leave", aliases=["disconnect", "dc"])
     async def leave_cmd(self, ctx: commands.Context):
         """Disconnects the bot from the voice channel."""
+        player = self.get_player(ctx.guild)
+        player.explicit_disconnect = True
+        player.queue.clear()
+        player.current = None
+        player.cancel_idle_timer()
+
         if ctx.guild and ctx.guild.voice_client:
             ch_name = ctx.guild.voice_client.channel.name if ctx.guild.voice_client.channel else "Voice Channel"
             await ctx.guild.voice_client.disconnect(force=True)
-            if ctx.guild.id in self.players:
-                self.players[ctx.guild.id].voice_client = None
+            player.voice_client = None
             embed = discord.Embed(
                 title=f"{E_HEADPHONES} Disconnected",
                 description=f">>> {E_TICK} Disconnected from **{ch_name}**.\n\n{E_USER} **Action by:** {ctx.author.mention}",
@@ -5333,13 +5717,9 @@ class MusicCog(commands.Cog, name="Music"):
 
             # Auto-join user's voice channel immediately
             if not is_vc_connected(ctx.guild.voice_client):
-                try:
-                    player.voice_client = await target_vc.connect(timeout=20.0, reconnect=True)
-                except Exception as e:
-                    if ctx.guild.voice_client:
-                        player.voice_client = ctx.guild.voice_client
-                    else:
-                        print(f"Failed to join voice on 24/7 enable: {e}")
+                player.voice_client = await self.connect_voice_channel(target_vc, timeout=20.0)
+                if not player.voice_client and ctx.guild.voice_client:
+                    player.voice_client = ctx.guild.voice_client
             else:
                 player.voice_client = ctx.guild.voice_client
                 if ctx.guild.voice_client.channel.id != target_vc.id:
