@@ -1,32 +1,19 @@
 FROM python:3.11-slim
 
-# Install FFmpeg and Opus audio codecs
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ffmpeg \
-    libopus0 \
-    libopus-dev \
-    gcc \
-    python3-dev \
-    git \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
-
 WORKDIR /app
 
-# Install python dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
-    pip install --no-cache-dir -r requirements.txt
+# Copy web requirements and install
+COPY requirements-web.txt .
+RUN pip install --no-cache-dir -r requirements-web.txt
 
-# Copy all code files
-COPY . .
+# Copy web bridge file
+COPY web_bridge.py .
 
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONIOENCODING=utf-8
-ENV PYTHONUTF8=1
 ENV PORT=10000
 
 EXPOSE 10000
 
-# Start Bot & Health Server
-CMD ["python", "bot.py"]
+# Start Web Gateway Bridge (NOT the Discord Bot)
+CMD ["python", "web_bridge.py"]

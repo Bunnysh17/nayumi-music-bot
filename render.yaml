@@ -1,11 +1,11 @@
 services:
   - type: web
-    name: nayumi-discord-bot
+    name: nayumi-web-gateway
     env: python
     region: oregon
     plan: free
-    buildCommand: pip install -r requirements.txt
-    startCommand: python bot.py
+    buildCommand: pip install -r requirements-web.txt
+    startCommand: python web_bridge.py
     autoDeploy: true
     envVars:
       - key: PORT
@@ -14,3 +14,5 @@ services:
         value: utf-8
       - key: PYTHONUNBUFFERED
         value: "1"
+      - key: BRIDGE_SECRET
+        value: nayumi_secret_bridge_2026

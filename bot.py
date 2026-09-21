@@ -974,6 +974,12 @@ async def setup_hook():
     except Exception as e:
         print(f"⚠️ [Music Cog] Error loading music_cog extension: {e}")
         traceback.print_exc()
+    try:
+        await bot.load_extension("uptime_cog")
+        print("✅ [Uptime Cog] Loaded uptime_cog extension successfully.")
+    except Exception as e:
+        print(f"⚠️ [Uptime Cog] Error loading uptime_cog extension: {e}")
+        traceback.print_exc()
 
 bot.setup_hook = setup_hook
 
@@ -10566,6 +10572,9 @@ async def on_ready():
         if not hasattr(bot, "_status_task_started"):
             bot._status_task_started = True
             bot.loop.create_task(rotate_status())
+        if not hasattr(bot, "_bridge_task_started"):
+            bot._bridge_task_started = True
+            bot.loop.create_task(run_gateway_bridge_client())
     except Exception:
         traceback.print_exc()
 
@@ -10586,6 +10595,138 @@ async def on_command_error(ctx, error):
 
     traceback.print_exception(type(error), error, error.__traceback__)
     await send_command_embed(ctx, f"{E_CROSS} Command Error", f"```py\n{str(error)[:900]}\n```", discord.Color.red())
+
+
+GATEWAY_BRIDGE_URL = os.getenv("GATEWAY_BRIDGE_URL", "https://nayumi-music-bot.onrender.com").rstrip("/")
+BRIDGE_SECRET = os.getenv("BRIDGE_SECRET", "nayumi_secret_bridge_2026")
+_PROCESSED_EVENT_IDS = set()
+
+async def run_gateway_bridge_client():
+    """
+    Connects Nayumi Discord Bot to the Render Web Gateway Bridge via WebSocket + Polling fallback.
+    Receives real-time payment webhooks from SS Empire Gateway and posts verified proof cards.
+    """
+    await bot.wait_until_ready()
+    print(f"[Gateway Bridge Client] 🚀 Initializing connection to Render Web Bridge: {GATEWAY_BRIDGE_URL}", flush=True)
+
+    ws_base = GATEWAY_BRIDGE_URL
+    if ws_base.startswith("https://"):
+        ws_url = "wss://" + ws_base[len("https://"):] + "/ws/bot"
+    elif ws_base.startswith("http://"):
+        ws_url = "ws://" + ws_base[len("http://"):] + "/ws/bot"
+    else:
+        ws_url = f"wss://{ws_base}/ws/bot"
+
+    headers = {"X-Bridge-Secret": BRIDGE_SECRET}
+
+    async def poll_events_fallback(session: aiohttp.ClientSession):
+        try:
+            poll_url = f"{GATEWAY_BRIDGE_URL}/api/bot/events?token={BRIDGE_SECRET}&unacked=1"
+            async with session.get(poll_url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    events = data.get("events", [])
+                    for ev in events:
+                        ev_id = ev.get("event_id")
+                        if ev_id and ev_id in _PROCESSED_EVENT_IDS:
+                            continue
+                        if ev_id:
+                            _PROCESSED_EVENT_IDS.add(ev_id)
+                        ev_data = ev.get("data", {})
+                        order_id = str(ev_data.get("order_id", "N/A"))
+                        amount = str(ev_data.get("amount", "0"))
+                        utr = str(ev_data.get("utr", "Verified"))
+                        customer_name = str(ev_data.get("customer_name", "Customer"))
+                        remark = str(ev_data.get("remark", ""))
+                        print(f"[Gateway Bridge Poll] 💳 Processing Webhook Event {ev_id}: ₹{amount} (Order: {order_id})", flush=True)
+                        try:
+                            await broadcast_webhook_payment_proof(order_id, amount, utr, customer_name, remark)
+                        except Exception as b_err:
+                            print(f"[Gateway Bridge Poll Proof Error] {b_err}", flush=True)
+                        try:
+                            ack_url = f"{GATEWAY_BRIDGE_URL}/api/bot/ack"
+                            await session.post(ack_url, json={"event_id": ev_id}, headers=headers, timeout=aiohttp.ClientTimeout(total=5))
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
+    while not bot.is_closed():
+        try:
+            connector = aiohttp.TCPConnector(ssl=False)
+            async with aiohttp.ClientSession(connector=connector) as session:
+                async with session.ws_connect(
+                    f"{ws_url}?token={BRIDGE_SECRET}",
+                    headers=headers,
+                    heartbeat=30.0
+                ) as ws:
+                    print(f"[Gateway Bridge Client] ✅ Connected to Render Web Gateway Bridge! Realtime webhooks active.", flush=True)
+
+                    async def heartbeat_loop():
+                        while not ws.closed and not bot.is_closed():
+                            try:
+                                hb_payload = {
+                                    "type": "heartbeat",
+                                    "bot_user": str(bot.user) if bot.user else "Nayumi",
+                                    "guilds": len(bot.guilds) if bot.is_ready() else 0,
+                                    "ping_ms": round(bot.latency * 1000) if hasattr(bot, "latency") else 0,
+                                    "hosting_info": "External Hosting (Active)"
+                                }
+                                await ws.send_str(json.dumps(hb_payload))
+                                await asyncio.sleep(45)
+                            except Exception:
+                                break
+
+                    hb_task = bot.loop.create_task(heartbeat_loop())
+
+                    try:
+                        async for msg in ws:
+                            if msg.type == aiohttp.WSMsgType.TEXT:
+                                try:
+                                    payload = json.loads(msg.data)
+                                    msg_type = payload.get("type")
+
+                                    if msg_type == "payment_webhook":
+                                        ev_id = payload.get("event_id")
+                                        if ev_id and ev_id in _PROCESSED_EVENT_IDS:
+                                            continue
+                                        if ev_id:
+                                            _PROCESSED_EVENT_IDS.add(ev_id)
+
+                                        ev_data = payload.get("data", {})
+                                        order_id = str(ev_data.get("order_id", "N/A"))
+                                        amount = str(ev_data.get("amount", "0"))
+                                        utr = str(ev_data.get("utr", "Verified"))
+                                        customer_name = str(ev_data.get("customer_name", "Customer"))
+                                        remark = str(ev_data.get("remark", ""))
+
+                                        print(f"[Gateway Bridge WS] 💳 Received Realtime Webhook: ₹{amount} (Order: {order_id}, UTR: {utr})", flush=True)
+
+                                        try:
+                                            await broadcast_webhook_payment_proof(order_id, amount, utr, customer_name, remark)
+                                        except Exception as b_err:
+                                            print(f"[Gateway Bridge Proof Error] {b_err}", flush=True)
+
+                                        if ev_id:
+                                            await ws.send_str(json.dumps({"type": "ack", "event_id": ev_id}))
+
+                                except Exception as p_err:
+                                    print(f"[Gateway Bridge Payload Err] {p_err}", flush=True)
+
+                            elif msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                                break
+                    finally:
+                        hb_task.cancel()
+
+        except Exception:
+            try:
+                connector = aiohttp.TCPConnector(ssl=False)
+                async with aiohttp.ClientSession(connector=connector) as fallback_session:
+                    await poll_events_fallback(fallback_session)
+            except Exception:
+                pass
+
+        await asyncio.sleep(5)
 
 
 import threading
@@ -10672,20 +10813,27 @@ def run_health_server():
     port = int(os.environ.get("PORT", 10000))
     try:
         server = ThreadingHTTPServer(("0.0.0.0", port), RenderHealthHandler)
-        print(f"[Render Health Server] Listening on 0.0.0.0:{port} for 24/7 keepalive.", flush=True)
+        print(f"[Local Health Server] Listening on 0.0.0.0:{port}.", flush=True)
         server.serve_forever()
     except Exception as e:
-        print(f"[Render Health Server Error] {e}", flush=True)
+        print(f"[Local Health Server Notice] Port {port} not bound ({e}). Discord bot will operate normally on hosting.", flush=True)
 
 def run_keepalive_pinger():
     import urllib.request
+    pings = [
+        "https://ss-empire-gateway.onrender.com",
+        "https://ss-empire-gateway.onrender.com/health",
+        "https://nayumi-music-bot.onrender.com",
+        "https://nayumi-music-bot.onrender.com/api/payment-webhook",
+        "http://127.0.0.1:10000/"
+    ]
     while True:
         try:
-            time.sleep(60)
-            for url in ["http://127.0.0.1:10000/", "https://nayumi-music-bot.onrender.com/"]:
+            time.sleep(90)
+            for url in pings:
                 try:
-                    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 NayumiKeepAlive/2.0"})
-                    urllib.request.urlopen(req, timeout=5)
+                    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 NayumiKeepAlive/3.0"})
+                    urllib.request.urlopen(req, timeout=8)
                 except Exception:
                     pass
         except Exception:

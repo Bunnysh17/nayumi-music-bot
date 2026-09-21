@@ -1,0 +1,44 @@
+{
+  "enabled": true,
+  "interval_seconds": 90,
+  "alert_channel_id": null,
+  "render_api_key": "rnd_7u6NIqx09YMLAsPp88fL3QO16wIX",
+  "mention_users": [
+    913264406912188456,
+    1438763359322247249,
+    1459031472576008306
+  ],
+  "ping_everyone_on_down": true,
+  "auto_restart_enabled": true,
+  "timeout_seconds": 10,
+  "targets": [
+    {
+      "id": "gateway_main",
+      "name": "SS Empire Gateway",
+      "url": "https://ss-empire-gateway.onrender.com",
+      "service_id": "srv-dao1l48ae00c73aesdm0",
+      "category": "Website"
+    },
+    {
+      "id": "gateway_health",
+      "name": "Gateway Health API",
+      "url": "https://ss-empire-gateway.onrender.com/health",
+      "service_id": "srv-dao1l48ae00c73aesdm0",
+      "category": "API"
+    },
+    {
+      "id": "nayumi_cloud",
+      "name": "Nayumi Cloud Service",
+      "url": "https://nayumi-music-bot.onrender.com",
+      "service_id": "srv-dag0v3gn74is73c29epg",
+      "category": "Website"
+    },
+    {
+      "id": "nayumi_webhook",
+      "name": "Payment Webhook API",
+      "url": "https://nayumi-music-bot.onrender.com/api/payment-webhook",
+      "service_id": "srv-dag0v3gn74is73c29epg",
+      "category": "Webhook"
+    }
+  ]
+}
