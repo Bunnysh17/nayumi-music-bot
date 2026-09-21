@@ -6897,8 +6897,9 @@ async def send_payment_proof_announcement(guild: Optional[discord.Guild], author
 
             await proof_chan.send(
                 content=(
-                    f"@everyone {E_BLACKCROWN} 📢 **NEW PAYMENT RECEIVED!** {E_BOOSTER}\n"
-                    f"{E_ARROW} **₹{amount}** received from {target_mention} {E_TICK} (Bank UTR: `{bank_utr}`)"
+                    f"{E_BLACKCROWN} 📢 **NEW PAYMENT RECEIVED!** {E_BOOSTER}\n"
+                    f"{E_ARROW} **₹{amount}** received from {target_mention} {E_TICK} (Bank UTR: `{bank_utr}`)\n"
+                    f"🔔 @everyone"
                 ),
                 embed=proof_embed,
                 allowed_mentions=discord.AllowedMentions(everyone=True, users=True, roles=True)
@@ -6957,8 +6958,9 @@ async def broadcast_webhook_payment_proof(order_id: str, amount: str, bank_utr: 
 
                 await chan.send(
                     content=(
-                        f"@everyone {E_BLACKCROWN} 📢 **NEW PAYMENT RECEIVED!** {E_BOOSTER}\n"
-                        f"{E_ARROW} **₹{amount}** received from {target_mention} {E_TICK} (Bank UTR: `{bank_utr}`)"
+                        f"{E_BLACKCROWN} 📢 **NEW PAYMENT RECEIVED!** {E_BOOSTER}\n"
+                        f"{E_ARROW} **₹{amount}** received from {target_mention} {E_TICK} (Bank UTR: `{bank_utr}`)\n"
+                        f"🔔 @everyone"
                     ),
                     embed=proof_embed,
                     allowed_mentions=discord.AllowedMentions(everyone=True, users=True, roles=True)
@@ -7003,8 +7005,9 @@ async def broadcast_webhook_payment_proof(order_id: str, amount: str, bank_utr: 
 
                     await chan.send(
                         content=(
-                            f"@everyone {E_BLACKCROWN} 📢 **NEW PAYMENT RECEIVED!** {E_BOOSTER}\n"
-                            f"{E_ARROW} **₹{amount}** received from {target_mention} {E_TICK} (Bank UTR: `{bank_utr}`)"
+                            f"{E_BLACKCROWN} 📢 **NEW PAYMENT RECEIVED!** {E_BOOSTER}\n"
+                            f"{E_ARROW} **₹{amount}** received from {target_mention} {E_TICK} (Bank UTR: `{bank_utr}`)\n"
+                            f"🔔 @everyone"
                         ),
                         embed=proof_embed,
                         allowed_mentions=discord.AllowedMentions(everyone=True, users=True, roles=True)
