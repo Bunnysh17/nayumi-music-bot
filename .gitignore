@@ -13,3 +13,4 @@ cookies.txt
 scratch/
 lavalink/*.jar
 lavalink/plugins/*.jar
+*.bak

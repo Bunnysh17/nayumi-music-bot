@@ -1,0 +1,170 @@
+================================================================================
+  PROMPT FOR WEBSITE / PAYMENT GATEWAY AI (DISCORD BOT DIRECT INTEGRATION)
+================================================================================
+
+[INSTRUCTIONS FOR AI DEVELOPER]
+You are working on the backend of our UPI Payment Gateway website.
+We need to integrate our Discord Bot (Nayumi) directly with our payment gateway backend.
+DO NOT use Discord Webhook URLs (e.g. discord.com/api/webhooks). 
+Instead, whenever a customer payment is successfully received and verified (status becomes "SUCCESS" and Bank UTR is generated), our payment gateway backend must send a direct HTTP POST request to our Discord Bot's webhook API endpoint so the bot can automatically post the transaction proof with an @everyone announcement in our Discord server.
+
+--------------------------------------------------------------------------------
+1. DISCORD BOT API SPECIFICATION
+--------------------------------------------------------------------------------
+- Method: POST
+- Endpoint URL: 
+    If bot is running locally / same machine:
+      http://127.0.0.1:10000/api/payment-webhook
+    If bot is hosted on Render / Cloud:
+      https://<YOUR_BOT_DOMAIN_HERE>/api/payment-webhook
+      (e.g., https://nayumi-music-bot.onrender.com/api/payment-webhook)
+
+- Request Headers:
+    Content-Type: application/json
+
+- Request Body (JSON):
+    {
+      "order_id": "<order_id>",               // e.g. "TXN178998237745E1"
+      "amount": "<amount>",                   // e.g. "100" or 100
+      "utr": "<12_digit_bank_utr>",           // e.g. "760366829987"
+      "customer_name": "<customer_name>",     // e.g. "Rahul" or "John Doe"
+      "remark": "<optional_remark_or_discord_id>" // e.g. "Discord_913264406912188456"
+    }
+
+- Expected Success Response:
+    HTTP 200 OK
+    {"success": true, "message": "Proof announced"}
+
+--------------------------------------------------------------------------------
+2. INTEGRATION LOCATION
+--------------------------------------------------------------------------------
+Find the backend route/function where:
+1. Bank payment callback / webhook is received, OR
+2. Order status is updated to "SUCCESS", OR
+3. Admin / automatic system verifies the 12-digit UTR for an order.
+
+Immediately after marking the order as SUCCESS in the database, call the notification function below.
+Make sure the HTTP call is non-blocking (asynchronous or wrapped in a try/except) so that if the bot is temporarily offline, the website checkout flow will NOT be interrupted or crash.
+
+--------------------------------------------------------------------------------
+3. CODE IMPLEMENTATION (CHOOSE YOUR BACKEND LANGUAGE)
+--------------------------------------------------------------------------------
+
+>>> [OPTION A: PYTHON (Flask / FastAPI / Django / Requests)] <<<
+
+import requests
+import threading
+
+BOT_WEBHOOK_URL = "http://127.0.0.1:10000/api/payment-webhook"
+# If hosted on Render/Cloud, replace with:
+# BOT_WEBHOOK_URL = "https://<YOUR_BOT_DOMAIN_HERE>/api/payment-webhook"
+
+def notify_discord_bot(order_id, amount, utr, customer_name="Customer", remark=""):
+    """Send payment success notification directly to Nayumi Discord Bot."""
+    payload = {
+        "order_id": str(order_id),
+        "amount": str(amount),
+        "utr": str(utr),
+        "customer_name": str(customer_name),
+        "remark": str(remark)
+    }
+    try:
+        resp = requests.post(BOT_WEBHOOK_URL, json=payload, timeout=5)
+        print(f"[Discord Bot Notification] Status: {resp.status_code}, Response: {resp.text}")
+    except Exception as e:
+        print(f"[Discord Bot Notification Error] Failed to notify bot: {e}")
+
+# To run without blocking user checkout, run in a background thread:
+def notify_discord_bot_async(order_id, amount, utr, customer_name="Customer", remark=""):
+    thread = threading.Thread(
+        target=notify_discord_bot,
+        args=(order_id, amount, utr, customer_name, remark),
+        daemon=True
+    )
+    thread.start()
+
+# Example usage when payment is verified:
+# notify_discord_bot_async(
+#     order_id=order["order_id"],
+#     amount=order["amount"],
+#     utr=order["utr"],
+#     customer_name=order.get("customer_name", "Customer"),
+#     remark=order.get("remark", "")
+# )
+
+
+>>> [OPTION B: NODE.JS (Express / Next.js / Axios)] <<<
+
+const axios = require('axios');
+
+const BOT_WEBHOOK_URL = process.env.BOT_WEBHOOK_URL || 'http://127.0.0.1:10000/api/payment-webhook';
+
+async function notifyDiscordBot(orderId, amount, utr, customerName = 'Customer', remark = '') {
+  try {
+    const response = await axios.post(
+      BOT_WEBHOOK_URL,
+      {
+        order_id: String(orderId),
+        amount: String(amount),
+        utr: String(utr),
+        customer_name: String(customerName),
+        remark: String(remark)
+      },
+      { timeout: 5000 }
+    );
+    console.log('[Discord Bot Notification] Success:', response.data);
+  } catch (error) {
+    console.error('[Discord Bot Notification Error]:', error.message);
+  }
+}
+
+// Example usage when payment is verified:
+// notifyDiscordBot(order.order_id, order.amount, order.utr, order.customer_name, order.remark);
+
+
+>>> [OPTION C: PHP] <<<
+
+function notify_discord_bot($order_id, $amount, $utr, $customer_name = "Customer", $remark = "") {
+    $bot_url = "http://127.0.0.1:10000/api/payment-webhook";
+    $payload = json_encode([
+        "order_id" => (string)$order_id,
+        "amount" => (string)$amount,
+        "utr" => (string)$utr,
+        "customer_name" => (string)$customer_name,
+        "remark" => (string)$remark
+    ]);
+
+    $ch = curl_init($bot_url);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_CUSTOMREQUEST, "POST");
+    curl_setopt($ch, CURLOPT_POSTFIELDS, $payload);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 5);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, [
+        'Content-Type: application/json',
+        'Content-Length: ' . strlen($payload)
+    ]);
+
+    $result = curl_exec($ch);
+    curl_close($ch);
+    return $result;
+}
+
+--------------------------------------------------------------------------------
+4. VERIFICATION TEST
+--------------------------------------------------------------------------------
+To test whether the bot receives the payment and posts to the proof channel with @everyone, run:
+
+curl -X POST http://127.0.0.1:10000/api/payment-webhook \
+  -H "Content-Type: application/json" \
+  -d '{
+    "order_id": "TEST_12345",
+    "amount": "100",
+    "utr": "760366829987",
+    "customer_name": "Test User",
+    "remark": "Discord_Test"
+  }'
+
+Bot will return:
+{"success": true, "message": "Proof announced"}
+and post the announcement in Discord!
+================================================================================

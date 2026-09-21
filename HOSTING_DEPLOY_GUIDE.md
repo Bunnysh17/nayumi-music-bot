@@ -77,13 +77,27 @@ pm2 startup
 
 ---
 
-## 🎮 Option 4: Pterodactyl / Bot Hosting Panel (Discord Bot Hosting)
+## 🎮 Option 4: Nexcloud / Pterodactyl Panel (Discord Bot Hosting)
+Yeh guide **Nexcloud Hosting** aur sabhi Pterodactyl panels ke liye hai:
 
-1. Panel par **Python** egg select karein (Python 3.10 ya 3.11).
-2. Files tab mein saari files upload karein.
-3. `.env` file create karein aur `DISCORD_BOT_TOKEN` paste karein.
-4. **Startup Command**: `python bot.py`
-5. Server **Start** karein.
+1. **Panel Login**: Nexcloud / Pterodactyl hosting panel par login karein.
+2. **Server Create / Egg**: **Python 3.10 ya Python 3.11** egg select karein (jisme FFmpeg available ho).
+3. **Files Upload**:
+   - Repository ki saari files (ya `bot.zip`) upload karke extract karein.
+4. **Environment Variables (.env)**:
+   - Panel ke **File Manager** mein `.env` file banayein aur apna `DISCORD_BOT_TOKEN`, `OWNER_ID`, etc. paste karein.
+   - Bot mein **Multi-Tier Audio Engine** laga hua hai (JioSaavn 320kbps CD Lossless + Multi-Client YouTube Android/iOS + SoundCloud), jo cloud datacenter par YouTube IP block nahi hone deta aur Spotify ke sabhi gane seamlessly play karta hai!
+5. **(Optional) Public Lavalink Setup**:
+   - Agar aap external Public Lavalink node use karna chahein, toh `.env` mein yeh add kar sakte hain:
+     ```env
+     LAVALINK_HOST=lava-v4.ajieblogs.eu.org
+     LAVALINK_PORT=443
+     LAVALINK_PASSWORD=https://dsc.gg/ajidevserver
+     LAVALINK_SECURE=true
+     ```
+6. **Startup Command**:
+   - `python bot.py`
+7. **Console**: Server ko **Start** karein. Console mein `CrownX Bot is online!` aate hi bot ready ho jayega.
 
 ---
 
@@ -94,3 +108,7 @@ pm2 startup
 | `OWNER_ID` | Owner ka Discord ID |
 | `DEFAULT_PREFIX` | Bot Prefix (e.g. `!`) |
 | `GEMINI_API_KEY` | Gemini AI Key (Optional) |
+| `LAVALINK_HOST` | Lavalink Host (Optional, default: 127.0.0.1 ya Public Node) |
+| `LAVALINK_PORT` | Lavalink Port (Optional, default: 2333 ya 443) |
+| `LAVALINK_PASSWORD` | Lavalink Password |
+| `LAVALINK_SECURE` | true / false |

@@ -333,7 +333,7 @@ def tool_manage_memory(context: Dict[str, Any], action: str, target_user: str = 
 def tool_system_status(context: Dict[str, Any]) -> str:
     raw_keys = [k.strip() for k in os.getenv("GEMINI_API_KEY", "").split(",") if k.strip()]
     hbx_st = "Active" if os.getenv("HELLBYTEX_API_KEY") else "Not Set"
-    phone_st = "Active (with Worker Fallback)" if os.getenv("PHONE_API_KEY") else "Not Set"
+    phone_st = "Active (ICMR & Live Multi-Source)" if (os.getenv("PHONE_ICMR_API_URL") or os.getenv("PHONE_API_URL")) else "Not Set"
     return f"Active Gemini Keys: {len(raw_keys)} | HellByteX: {hbx_st} | Phone API: {phone_st}"
 
 
@@ -426,12 +426,23 @@ def tool_self_code_update(context: Dict[str, Any], target_file: str, target_snip
 
 @register_tool(
     name="standby_mode",
-    description="Puts the bot into complete silent sleep/standby mode until Owner triggers wakeup.",
+    description="Puts the bot into complete silent sleep/standby mode until Owner or AI Whitelisted user triggers wakeup.",
     parameters={"type": "object", "properties": {}},
-    risk_level=RISK_MEDIUM,
-    owner_only=True
+    risk_level=RISK_LOW,
+    owner_only=False
 )
 def tool_standby_mode(context: Dict[str, Any]) -> str:
+    user_id = context.get("user_id") or 0
+    is_owner = context.get("is_owner", False)
+    is_whitelisted = False
+    try:
+        from bot import is_ai_user_whitelisted
+        is_whitelisted = is_ai_user_whitelisted(user_id)
+    except Exception:
+        pass
+    if not (is_owner or is_whitelisted):
+        return "Permission denied: Only Bot Owner and AI Whitelisted users can put Nayumi into sleep/standby mode."
+
     set_standby_state = context.get("set_standby_state")
     message = context.get("message")
     if set_standby_state:
@@ -444,9 +455,20 @@ def tool_standby_mode(context: Dict[str, Any]) -> str:
     description="Wakes the bot up from standby/sleep mode.",
     parameters={"type": "object", "properties": {}},
     risk_level=RISK_LOW,
-    owner_only=True
+    owner_only=False
 )
 def tool_wakeup_mode(context: Dict[str, Any]) -> str:
+    user_id = context.get("user_id") or 0
+    is_owner = context.get("is_owner", False)
+    is_whitelisted = False
+    try:
+        from bot import is_ai_user_whitelisted
+        is_whitelisted = is_ai_user_whitelisted(user_id)
+    except Exception:
+        pass
+    if not (is_owner or is_whitelisted):
+        return "Permission denied: Only Bot Owner and AI Whitelisted users can wake Nayumi up."
+
     set_standby_state = context.get("set_standby_state")
     if set_standby_state:
         set_standby_state(False)
@@ -806,6 +828,187 @@ async def tool_run_custom_action(context: Dict[str, Any], code: str) -> str:
         return str(result) if result is not None else "Custom action completed."
     except Exception as e:
         return f"Execution Error: {str(e)}"
+
+
+@register_tool(
+    name="join_vc",
+    description="Connects Nayumi to the user's voice channel in this server.",
+    parameters={
+        "type": "object",
+        "properties": {
+            "channel_name": {"type": "string", "description": "Optional name or ID of the voice channel to join"}
+        }
+    },
+    risk_level=RISK_LOW,
+    owner_only=False
+)
+async def tool_join_vc(context: Dict[str, Any], channel_name: str = "", **kwargs) -> str:
+    bot = context.get("bot")
+    message = context.get("message")
+    if not bot or not message or not message.guild:
+        return "Voice channel commands can only be used inside a Discord server!"
+
+    import discord
+    member = message.author if isinstance(message.author, discord.Member) else message.guild.get_member(message.author.id)
+    if not member:
+        try:
+            member = await message.guild.fetch_member(message.author.id)
+        except Exception:
+            pass
+
+    target_vc = None
+    if member and getattr(member, 'voice', None) and member.voice.channel:
+        target_vc = member.voice.channel
+
+    if not target_vc and channel_name:
+        for vc in message.guild.voice_channels:
+            if channel_name.lower() in vc.name.lower() or str(vc.id) == channel_name:
+                target_vc = vc
+                break
+
+    if not target_vc:
+        return f"Aap kisi voice channel me connect nahi ho, {message.author.display_name}! Pehle kisi VC me connect ho jao, fir bolo main turant aajaungi. 🎀✨"
+
+    music_cog = bot.get_cog("MusicCog")
+    if music_cog:
+        try:
+            player = music_cog.get_player(message.guild)
+            player.explicit_disconnect = False
+            vc_client = await music_cog.connect_voice_channel(target_vc, timeout=15.0)
+            if vc_client:
+                player.voice_client = vc_client
+                return f"Successfully connected to voice channel **{target_vc.name}**!"
+        except Exception as e:
+            return f"Voice connect error: {e}"
+
+    try:
+        if message.guild.voice_client:
+            await message.guild.voice_client.move_to(target_vc)
+        else:
+            await target_vc.connect(timeout=15.0)
+        return f"Successfully joined voice channel **{target_vc.name}**!"
+    except Exception as e:
+        return f"Voice connection failed: {e}"
+
+
+@register_tool(
+    name="leave_vc",
+    description="Disconnects Nayumi from the current voice channel in this server.",
+    parameters={"type": "object", "properties": {}},
+    risk_level=RISK_LOW,
+    owner_only=False
+)
+async def tool_leave_vc(context: Dict[str, Any], **kwargs) -> str:
+    bot = context.get("bot")
+    message = context.get("message")
+    if not bot or not message or not message.guild:
+        return "Voice commands are only available in a server."
+
+    music_cog = bot.get_cog("MusicCog")
+    if music_cog:
+        player = music_cog.players.get(message.guild.id)
+        if player:
+            try:
+                await player.destroy()
+                return "Successfully disconnected from voice channel!"
+            except Exception:
+                pass
+
+    if message.guild.voice_client:
+        try:
+            await message.guild.voice_client.disconnect(force=True)
+            return "Successfully disconnected from voice channel!"
+        except Exception as e:
+            return f"Disconnect error: {e}"
+
+    return "Nayumi is not connected to any voice channel in this server."
+
+
+@register_tool(
+    name="play_music",
+    description="Plays a song or audio track in the server voice channel.",
+    parameters={
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "Song name, artist, or music URL"}
+        },
+        "required": ["query"]
+    },
+    risk_level=RISK_LOW,
+    owner_only=False
+)
+async def tool_play_music(context: Dict[str, Any], query: str = "", **kwargs) -> str:
+    bot = context.get("bot")
+    message = context.get("message")
+    if not bot or not message or not message.guild:
+        return "Music can only be played in a Discord server."
+
+    clean_q = query.strip()
+    # Strip any surrounding quotes or colloquial affixes
+    clean_q = re.sub(r'^[\'"“‘]+|[\'"”’]+$', '', clean_q).strip()
+    clean_q = re.sub(r'^(?:song|gaana|gana|track|music)\s+', '', clean_q, flags=re.IGNORECASE).strip()
+    clean_q = re.sub(r'\s+(?:song|gaana|gana)?\s*(?:ko)?\s*(?:iske\s+baad|next|baad\s+me)?\s*(?:play|chala|baja|laga)?.*$', '', clean_q, flags=re.IGNORECASE).strip()
+    clean_q = re.sub(r'\s+(?:song|gaana|gana|track|music)$', '', clean_q, flags=re.IGNORECASE).strip()
+    clean_q = re.sub(r'\s+(?:ko|ka|ki|ke|wala|wali)$', '', clean_q, flags=re.IGNORECASE).strip()
+    clean_q = re.sub(r'^[\'"“‘]+|[\'"”’]+$', '', clean_q).strip()
+
+    GENERIC_QUERIES = {
+        "", "koi gana", "koi acha gana", "acha gana", "gana", "gaana", "song", "music",
+        "kuch bhi", "apne hisab se", "apne man se", "koi sa bhi", "random", "acha sa gana",
+        "ek gana", "gana gaa de", "gana bajao", "gana chalao", "gana gao", "muh se gao",
+        "mere liye gana gaa de", "gana suna de", "gana sunao"
+    }
+    if clean_q.lower() in GENERIC_QUERIES or len(clean_q) < 2:
+        top_vibe_songs = [
+            "Kesariya", "Apna Bana Le", "Channa Mereya", "Raataan Lambiyan", "Sajni",
+            "Heeriye", "Tum Hi Ho", "Pehle Bhi Main", "Lover Diljit", "Kahani Suno",
+            "Hasi Ban Gaye", "Tu Hai Kahan", "Maan Meri Jaan"
+        ]
+        import random
+        clean_q = random.choice(top_vibe_songs)
+
+    prefix = "!"
+    try:
+        from bot import get_prefix_for_guild
+        prefix = get_prefix_for_guild(message.guild.id)
+    except Exception:
+        pass
+
+    message.content = f"{prefix}play {clean_q}"
+    ctx = await bot.get_context(message)
+    play_cmd = bot.get_command("play")
+    if play_cmd:
+        await ctx.invoke(play_cmd, query=clean_q)
+        return f"Now playing/queued: **{clean_q}**"
+    return "Play command unavailable."
+
+
+@register_tool(
+    name="control_music",
+    description="Controls music playback in the server: 'pause', 'resume', 'skip', 'stop', 'queue', 'loop'.",
+    parameters={
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "description": "Music action: pause, resume, skip, stop, queue, loop"}
+        },
+        "required": ["action"]
+    },
+    risk_level=RISK_LOW,
+    owner_only=False
+)
+async def tool_control_music(context: Dict[str, Any], action: str = "", **kwargs) -> str:
+    bot = context.get("bot")
+    message = context.get("message")
+    if not bot or not message or not message.guild:
+        return "Music control is only available in a server."
+
+    clean_act = action.strip().lower()
+    cmd = bot.get_command(clean_act)
+    if cmd:
+        ctx = await bot.get_context(message)
+        await ctx.invoke(cmd)
+        return f"Music action '{clean_act}' executed successfully!"
+    return f"Unknown music action '{clean_act}'."
 
 
 def parse_action_params(params_raw: str) -> Dict[str, Any]:
