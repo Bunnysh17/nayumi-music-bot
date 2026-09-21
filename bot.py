@@ -6871,6 +6871,7 @@ async def send_payment_proof_announcement(guild: Optional[discord.Guild], author
             proof_embed = discord.Embed(
                 title=f"{E_BLACKCROWN} NEW PAYMENT RECEIVED & VERIFIED! {E_TICK}",
                 description=(
+                    f"🔔 **Notification:** @everyone\n"
                     f"{E_BOOSTER} **Transaction Credited & Settled Instantly!**\n"
                     f"{E_ARROW} **`₹{amount}`** received from {target_mention} {E_TICK} (Bank UTR: `{bank_utr}`)\n\n"
                     f"Your payment has been successfully recorded on the banking network via **SS EMPIRE Instant UPI Engine 2.0**.\n\n"
@@ -6928,6 +6929,7 @@ async def broadcast_webhook_payment_proof(order_id: str, amount: str, bank_utr: 
                 proof_embed = discord.Embed(
                     title=f"{E_BLACKCROWN} NEW PAYMENT RECEIVED & VERIFIED! {E_TICK}",
                     description=(
+                        f"🔔 **Notification:** @everyone\n"
                         f"{E_BOOSTER} **Transaction Credited & Settled Instantly!**\n"
                         f"{E_ARROW} **`₹{amount}`** received from {target_mention} {E_TICK} (Bank UTR: `{bank_utr}`)\n\n"
                         f"Your payment has been successfully recorded on the banking network via **SS EMPIRE Instant UPI Engine 2.0**.\n\n"
@@ -6972,6 +6974,7 @@ async def broadcast_webhook_payment_proof(order_id: str, amount: str, bank_utr: 
                     proof_embed = discord.Embed(
                         title=f"{E_BLACKCROWN} NEW PAYMENT RECEIVED & VERIFIED! {E_TICK}",
                         description=(
+                            f"🔔 **Notification:** @everyone\n"
                             f"{E_BOOSTER} **Transaction Credited & Settled Instantly!**\n"
                             f"{E_ARROW} **`₹{amount}`** received from {target_mention} {E_TICK} (Bank UTR: `{bank_utr}`)\n\n"
                             f"Your payment has been successfully recorded on the banking network via **SS EMPIRE Instant UPI Engine 2.0**.\n\n"
