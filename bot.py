@@ -6869,9 +6869,10 @@ async def send_payment_proof_announcement(guild: Optional[discord.Guild], author
         try:
             target_mention = author.mention if author else "**Customer**"
             proof_embed = discord.Embed(
-                title=f"{E_CROWN} Payment Successfully Received & Verified! {E_TICK}",
+                title=f"{E_BLACKCROWN} NEW PAYMENT RECEIVED & VERIFIED! {E_TICK}",
                 description=(
-                    f"{E_DIAMOND} **Transaction Credited & Settled Instantly!**\n"
+                    f"{E_BOOSTER} **Transaction Credited & Settled Instantly!**\n"
+                    f"{E_ARROW} **`₹{amount}`** received from {target_mention} {E_TICK} (Bank UTR: `{bank_utr}`)\n\n"
                     f"Your payment has been successfully recorded on the banking network via **SS EMPIRE Instant UPI Engine 2.0**.\n\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
                 ),
@@ -6896,11 +6897,7 @@ async def send_payment_proof_announcement(guild: Optional[discord.Guild], author
             )
 
             await proof_chan.send(
-                content=(
-                    f"{E_BLACKCROWN} 📢 **NEW PAYMENT RECEIVED!** {E_BOOSTER}\n"
-                    f"{E_ARROW} **₹{amount}** received from {target_mention} {E_TICK} (Bank UTR: `{bank_utr}`)\n"
-                    f"🔔 @everyone"
-                ),
+                content="@everyone",
                 embed=proof_embed,
                 allowed_mentions=discord.AllowedMentions(everyone=True, users=True, roles=True)
             )
@@ -6929,9 +6926,10 @@ async def broadcast_webhook_payment_proof(order_id: str, amount: str, bank_utr: 
             chan = bot.get_channel(int(chan_id)) or await bot.fetch_channel(int(chan_id))
             if chan:
                 proof_embed = discord.Embed(
-                    title=f"{E_CROWN} Payment Successfully Received & Verified! {E_TICK}",
+                    title=f"{E_BLACKCROWN} NEW PAYMENT RECEIVED & VERIFIED! {E_TICK}",
                     description=(
-                        f"{E_DIAMOND} **Transaction Credited & Settled Instantly!**\n"
+                        f"{E_BOOSTER} **Transaction Credited & Settled Instantly!**\n"
+                        f"{E_ARROW} **`₹{amount}`** received from {target_mention} {E_TICK} (Bank UTR: `{bank_utr}`)\n\n"
                         f"Your payment has been successfully recorded on the banking network via **SS EMPIRE Instant UPI Engine 2.0**.\n\n"
                         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
                     ),
@@ -6957,11 +6955,7 @@ async def broadcast_webhook_payment_proof(order_id: str, amount: str, bank_utr: 
                 )
 
                 await chan.send(
-                    content=(
-                        f"{E_BLACKCROWN} 📢 **NEW PAYMENT RECEIVED!** {E_BOOSTER}\n"
-                        f"{E_ARROW} **₹{amount}** received from {target_mention} {E_TICK} (Bank UTR: `{bank_utr}`)\n"
-                        f"🔔 @everyone"
-                    ),
+                    content="@everyone",
                     embed=proof_embed,
                     allowed_mentions=discord.AllowedMentions(everyone=True, users=True, roles=True)
                 )
@@ -6976,9 +6970,10 @@ async def broadcast_webhook_payment_proof(order_id: str, amount: str, bank_utr: 
                 chan = bot.get_channel(int(env_id.strip())) or await bot.fetch_channel(int(env_id.strip()))
                 if chan:
                     proof_embed = discord.Embed(
-                        title=f"{E_CROWN} Payment Successfully Received & Verified! {E_TICK}",
+                        title=f"{E_BLACKCROWN} NEW PAYMENT RECEIVED & VERIFIED! {E_TICK}",
                         description=(
-                            f"{E_DIAMOND} **Transaction Credited & Settled Instantly!**\n"
+                            f"{E_BOOSTER} **Transaction Credited & Settled Instantly!**\n"
+                            f"{E_ARROW} **`₹{amount}`** received from {target_mention} {E_TICK} (Bank UTR: `{bank_utr}`)\n\n"
                             f"Your payment has been successfully recorded on the banking network via **SS EMPIRE Instant UPI Engine 2.0**.\n\n"
                             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
                         ),
@@ -7004,11 +6999,7 @@ async def broadcast_webhook_payment_proof(order_id: str, amount: str, bank_utr: 
                     )
 
                     await chan.send(
-                        content=(
-                            f"{E_BLACKCROWN} 📢 **NEW PAYMENT RECEIVED!** {E_BOOSTER}\n"
-                            f"{E_ARROW} **₹{amount}** received from {target_mention} {E_TICK} (Bank UTR: `{bank_utr}`)\n"
-                            f"🔔 @everyone"
-                        ),
+                        content="@everyone",
                         embed=proof_embed,
                         allowed_mentions=discord.AllowedMentions(everyone=True, users=True, roles=True)
                     )
